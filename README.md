@@ -4,7 +4,7 @@ Personalized project discovery: RabbitHole recommends interesting software-engin
 
 The recommender is the product. It is a modular pipeline — user profile → candidate retrieval → ranking → session adjustment → diversification → explanation — built from understandable, testable functions with centralized configuration, offline evaluation and baseline comparison.
 
-> **Status:** Phase 1 (foundation) is implemented: schema, deterministic seed catalog, central recommender configuration, app shell and tooling. Recommendation logic arrives in the following phases (see *Roadmap*).
+> **Status:** Phases 1–2 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, and feature-based long-term/session profiles. Candidate retrieval, ranking and the recommendation feed arrive in the following phases.
 
 ## Technology stack
 
@@ -65,9 +65,11 @@ Open http://localhost:3000. A demo user without completed onboarding is sent to 
 ## Tests
 
 ```bash
-npm test          # Vitest unit tests (recommender + seed + utilities)
-npm run test:e2e  # Playwright (needs a migrated + seeded database; run `npx playwright install chromium` once)
+npm test          # Vitest unit tests (recommender + services + seed + utilities)
+npm run test:e2e  # Playwright (needs a migrated database; run `npx playwright install chromium` once)
 ```
+
+`npm run test:e2e` re-runs the seed and **resets the demo user's onboarding and behaviour** before the suite so flows are deterministic.
 
 ## Evaluation
 
@@ -101,18 +103,40 @@ User → Interactions → User profile (long-term + session)
      → New feedback → updated recommendations
 ```
 
-- `lib/recommender/config.ts` — every tunable number (interaction weights, time decay, candidate counts, ranking weights, session blending, exploration slopes, diversity, feed limits, evaluation Ks).
+Layering: React/UI → API routes → services (`lib/sessions`, `lib/interactions`, `lib/onboarding`, `lib/profile`) → pure recommender functions (`lib/recommender`) → Prisma (`lib/db.ts`).
+
+- `lib/recommender/config.ts` — every tunable number (interaction weights, time decay, feature-family weights, onboarding signal strengths, candidate counts, ranking weights, session blending, exploration slopes, diversity, feed limits, evaluation Ks).
 - `lib/recommender/types.ts` — contracts between stages (feature vectors, candidates with sources, score breakdowns, pipeline stats).
-- `lib/recommender/*` — retrieval, ranking, session, diversification, explanation, evaluation modules (added phase by phase).
+- `lib/recommender/features.ts` — project → namespaced feature vector (`tag:`, `lang:`, `difficulty:`, `duration:`).
+- `lib/recommender/decay.ts` — half-life decay `0.5 ** (ageDays / halfLifeDays)`.
+- `lib/recommender/profile.ts` — signed feature profiles: `raw[f] += weight(type) * decay * projectFeature[f]`, plus explicit onboarding signals; L2-normalised `vector` for similarity and max-abs `strengths` for display; long-term vs session builders.
+- `lib/sessions/` — server-side session resolution (30-minute inactivity timeout, explicit "start new session").
+- `lib/interactions/` — interaction recording with server-owned weights, zod schemas, per-project state derivation.
+- `lib/onboarding/` — topic → tag mapping, curated cross-domain pairwise choices, persistence.
+- `lib/profile/` — profile snapshot (long-term + session profiles, statistics) and settings updates.
 - `prisma/schema.prisma` — users, sessions, interactions, catalog (projects/tags/languages), onboarding answers and recommendation diagnostics.
 - `prisma/seed-data/` — the hand-authored catalog and the synthetic-population generator.
 
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/interactions` | Record `{ projectId, type, dwellMs? }` for the demo user; the server resolves the session and the weight |
+| `GET /api/profile` | Onboarding state, exploration preference, long-term and session profiles, statistics, active session |
+| `PATCH /api/profile` | Update supported settings (`explorationPreference` in [0, 1]) |
+| `GET /api/sessions` / `POST /api/sessions` | Current session / start a new session |
+| `GET /api/onboarding` / `POST /api/onboarding` | Questionnaire definition + state / complete onboarding |
+
+Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 status codes.
+
 ## Implemented algorithms
 
-Phase 1 ships the foundation only. Planned V1 algorithms: feature-based user profiles with half-life decay, cosine content similarity, item-item collaborative filtering, popularity priors, exploration retrieval, weighted hybrid ranking with exploration-adjusted weights, session/long-term profile blending, MMR-style diversification, deterministic explanations, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with Random/Popularity/Content/Collaborative/Hybrid baselines, and a BPR experiment.
+- Feature-based user profiles (Phase 2): decayed, weighted aggregation of project features from interactions, explicit onboarding prior (topics, pairwise choices, difficulty/duration), signed normalisation, separate long-term and session profiles.
+- Planned: cosine content similarity, item-item collaborative filtering, popularity priors, exploration retrieval, weighted hybrid ranking with exploration-adjusted weights, session/long-term blending, MMR-style diversification, deterministic explanations, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
 
 ## Current limitations
 
-- Recommendations, onboarding, interaction recording, saved projects and Insights diagnostics are not yet implemented (Phases 2–8).
+- The recommendation feed, saved-projects page and recommendation diagnostics are not yet implemented (Phases 3–8); `/discover` shows a catalog preview.
+- Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).
 - Local development only; no deployment configuration.

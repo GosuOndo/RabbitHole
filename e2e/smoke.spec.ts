@@ -24,8 +24,9 @@ test.describe("application shell", () => {
 
   test("insights shows real catalog counts", async ({ page }) => {
     await page.goto("/insights");
-    await expect(page.getByText("Projects in catalog")).toBeVisible();
-    const value = await page.locator("dd").first().textContent();
+    const catalog = page.getByTestId("catalog-stats");
+    await expect(catalog).toContainText("Projects");
+    const value = await catalog.locator("dd").first().textContent();
     expect(Number((value ?? "0").replace(/[^0-9]/g, ""))).toBeGreaterThan(100);
   });
 });

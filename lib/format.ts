@@ -1,5 +1,8 @@
 import type { Difficulty, DurationPreference } from "@/generated/prisma/enums";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
+import { durationBucketForHours } from "@/lib/recommender/features";
+
+export { durationBucketForHours };
 
 export const DIFFICULTY_LABELS: Record<Difficulty, string> = {
   BEGINNER: "Beginner",
@@ -12,15 +15,6 @@ export const DIFFICULTY_ORDER: Record<Difficulty, number> = {
   INTERMEDIATE: 1,
   ADVANCED: 2,
 };
-
-/** Duration bucket (excluding ANYTHING) that an estimated-hours value falls into. */
-export function durationBucketForHours(hours: number): Exclude<DurationPreference, "ANYTHING"> {
-  const buckets = RECOMMENDER_CONFIG.durationBuckets;
-  if (hours <= buckets.UNDER_2_HOURS.maxHours) return "UNDER_2_HOURS";
-  if (hours <= buckets.ONE_EVENING.maxHours) return "ONE_EVENING";
-  if (hours <= buckets.WEEKEND.maxHours) return "WEEKEND";
-  return "ONE_TO_TWO_WEEKS";
-}
 
 export function durationBucketLabel(bucket: DurationPreference): string {
   return RECOMMENDER_CONFIG.durationBuckets[bucket].label;

@@ -51,6 +51,18 @@ describe("RECOMMENDER_CONFIG", () => {
     expect(STRONG_POSITIVE_INTERACTION_TYPES).not.toContain("DISLIKE");
   });
 
+  it("defines modest, well-signed onboarding signals", () => {
+    const { onboarding } = RECOMMENDER_CONFIG;
+    expect(onboarding.minTopics).toBeGreaterThanOrEqual(1);
+    expect(onboarding.minTopics).toBeLessThanOrEqual(onboarding.maxTopics);
+    expect(onboarding.topicSignal).toBeGreaterThan(0);
+    expect(onboarding.pairwiseChosenSignal).toBeGreaterThan(0);
+    expect(onboarding.pairwiseRejectedSignal).toBeLessThan(0);
+    expect(Math.abs(onboarding.pairwiseRejectedSignal)).toBeLessThan(onboarding.pairwiseChosenSignal);
+    expect(onboarding.difficultySignal).toBeGreaterThan(0);
+    expect(onboarding.durationSignal).toBeGreaterThan(0);
+  });
+
   it("keeps feed limits and evaluation Ks sensible", () => {
     expect(RECOMMENDER_CONFIG.feed.defaultLimit).toBeLessThanOrEqual(RECOMMENDER_CONFIG.feed.maxLimit);
     expect(RECOMMENDER_CONFIG.evaluation.ks).toEqual([5, 10]);

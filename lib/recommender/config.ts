@@ -37,9 +37,18 @@ export const RECOMMENDER_CONFIG = {
     historyWindowDays: 365,
   },
 
-  /** How project attributes are turned into profile / content features. */
+  /**
+   * How project attributes are turned into profile / content features.
+   * Feature ids are namespaced: `tag:<slug>`, `lang:<slug>`,
+   * `difficulty:<level>`, `duration:<bucket>`.
+   */
   profile: {
-    /** Relative importance of each feature family when building vectors. */
+    /**
+     * Value of each feature family in a project's feature vector. Every tag
+     * carries the full tag weight; languages share the language weight equally
+     * (a project listing five languages says little about any one of them);
+     * difficulty and duration are single features.
+     */
     featureFamilyWeights: {
       tag: 1.0,
       language: 0.5,
@@ -48,6 +57,27 @@ export const RECOMMENDER_CONFIG = {
     },
     /** Number of strongest features surfaced in explanations / insights. */
     topFeatureCount: 5,
+  },
+
+  /**
+   * Explicit onboarding signals added to the long-term profile (they are not
+   * fake interactions and do not decay). Magnitudes are deliberately modest —
+   * a topic selection is worth about one SAVE — so real behaviour takes over
+   * quickly.
+   */
+  onboarding: {
+    minTopics: 3,
+    maxTopics: 7,
+    /** Per selected topic, scaled by the topic → tag mapping weight. */
+    topicSignal: 2.0,
+    /** Applied to every feature of a project chosen in a pairwise comparison. */
+    pairwiseChosenSignal: 1.5,
+    /** Applied to every feature of the rejected project (a mild negative). */
+    pairwiseRejectedSignal: -0.5,
+    /** Added to `difficulty:<pref>` unless "surprise me". */
+    difficultySignal: 1.0,
+    /** Added to `duration:<pref>` unless "anything". */
+    durationSignal: 1.0,
   },
 
   /** Session handling and long-term/session profile blending. */

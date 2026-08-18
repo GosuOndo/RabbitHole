@@ -2,10 +2,14 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DatabaseSetupNotice } from "@/components/database-setup-notice";
+import { ProjectActions } from "@/components/project-actions";
 import { ProjectMeta, TagList } from "@/components/project-meta";
+import { ProjectOpenTracker } from "@/components/project-open-tracker";
 import { getProjectBySlug } from "@/lib/catalog/queries";
 import { isDatabaseConfigured } from "@/lib/db";
+import { getOrCreateDemoUser } from "@/lib/demo-user";
 import { splitParagraphs } from "@/lib/format";
+import { getProjectStateForUser } from "@/lib/profile/profile-service";
 
 export const dynamic = "force-dynamic";
 
@@ -26,10 +30,13 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
   const project = await getProjectBySlug(slug);
   if (!project) notFound();
 
+  const user = await getOrCreateDemoUser();
+  const actionState = await getProjectStateForUser(user.id, project.id);
   const paragraphs = splitParagraphs(project.description);
 
   return (
     <article className="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[minmax(0,1fr)_280px]">
+      <ProjectOpenTracker projectId={project.id} />
       <div>
         <nav aria-label="Breadcrumb" className="mb-4 text-xs text-subtle">
           <Link href="/discover" className="hover:text-foreground">
@@ -45,6 +52,9 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
           <p className="text-base leading-relaxed text-muted text-pretty">{project.summary}</p>
           <ProjectMeta difficulty={project.difficulty} estimatedHours={project.estimatedHours} />
           <TagList tags={project.tags} />
+          <div className="mt-2">
+            <ProjectActions projectId={project.id} initialState={actionState} />
+          </div>
         </header>
 
         <section aria-labelledby="about" className="mt-8">
@@ -108,8 +118,8 @@ export default async function ProjectPage({ params }: { params: Promise<Params> 
         ) : null}
 
         <p className="text-xs leading-relaxed text-subtle">
-          Save, Build and Not-interested actions, the recommendation explanation and similar projects arrive with the recommender in later
-          phases.
+          Opening, saving, building and skipping projects feeds your taste profile (see Insights). The recommendation explanation and
+          similar projects arrive with the recommender in later phases.
         </p>
       </aside>
     </article>

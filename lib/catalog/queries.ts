@@ -72,6 +72,13 @@ export async function getProjectBySlug(slug: string): Promise<ProjectDetail | nu
   return row ? toDetail(row) : null;
 }
 
+/** Projects for the given slugs (order not guaranteed; missing slugs are omitted). */
+export async function getProjectsBySlugs(slugs: readonly string[]): Promise<ProjectDetail[]> {
+  if (slugs.length === 0) return [];
+  const rows = await prisma.project.findMany({ where: { slug: { in: [...slugs] } }, include: projectInclude });
+  return rows.map(toDetail);
+}
+
 export interface CatalogStats {
   projects: number;
   tags: number;
