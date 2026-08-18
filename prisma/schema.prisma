@@ -1,0 +1,284 @@
+// RabbitHole database schema.
+//
+// Design notes:
+// - `User` is the anchor for a future authentication layer (accounts would link
+//   to a User row); V1 only has one persistent demo user plus seeded synthetic
+//   users used for collaborative filtering and offline evaluation.
+// - Behavioural data (Session, Interaction) is the primary recommender input.
+// - Onboarding answers are stored explicitly so cold-start signals stay
+//   inspectable rather than being folded into opaque numbers.
+// - RecommendationRun/RecommendationResult are optional diagnostics that power
+//   the Insights page. They are written per feed request, not per render.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+/// The interaction type is authoritative; `Interaction.weight` is a denormalised
+/// snapshot of the configured weight at write time (see lib/recommender/config.ts).
+enum InteractionType {
+  IMPRESSION
+  OPEN
+  SAVE
+  UNSAVE
+  DISLIKE
+  BUILD
+  COMPLETE
+  SHARE
+}
+
+/// Desired project duration captured during onboarding.
+enum DurationPreference {
+  UNDER_2_HOURS
+  ONE_EVENING
+  WEEKEND
+  ONE_TO_TWO_WEEKS
+  ANYTHING
+}
+
+// ---------------------------------------------------------------------------
+// Users & sessions
+// ---------------------------------------------------------------------------
+
+model User {
+  id                    String   @id @default(cuid())
+  /// Stable human-readable identifier ("demo", "synthetic-01", ...). A future
+  /// auth layer can attach credentials/emails to a User without changing this.
+  handle                String   @unique
+  name                  String
+  /// 0 = strongly familiar / exploit, 1 = strongly adventurous / explore.
+  explorationPreference Float    @default(0.35)
+  onboardingCompleted   Boolean  @default(false)
+  /// Seeded users used for collaborative filtering and offline evaluation.
+  isSynthetic           Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  sessions           Session[]
+  interactions       Interaction[]
+  onboardingProfile  OnboardingProfile?
+  pairwiseChoices    OnboardingPairwiseChoice[]
+  recommendationRuns RecommendationRun[]
+}
+
+/// A bounded browsing period. A new session starts after the configured
+/// inactivity timeout (RECOMMENDER_CONFIG.session.timeoutMinutes) or when the
+/// user explicitly starts a new session.
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  startedAt    DateTime  @default(now())
+  lastActiveAt DateTime  @default(now())
+  endedAt      DateTime?
+
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interactions       Interaction[]
+  recommendationRuns RecommendationRun[]
+
+  @@index([userId, lastActiveAt])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+model Project {
+  id             String     @id @default(cuid())
+  slug           String     @unique
+  title          String
+  summary        String
+  description    String
+  difficulty     Difficulty
+  estimatedHours Int
+  /// Deterministic seed prior in [0, 1]. Runtime popularity blends this with
+  /// observed interaction data.
+  popularity     Float      @default(0)
+  /// Concepts / skills the builder will practise ("What you'll learn").
+  concepts       String[]   @default([])
+  sourceUrl      String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  tags                  ProjectTag[]
+  languages             ProjectLanguage[]
+  interactions          Interaction[]
+  recommendationResults RecommendationResult[]
+  chosenInPairs         OnboardingPairwiseChoice[] @relation("PairwiseChosen")
+  rejectedInPairs       OnboardingPairwiseChoice[] @relation("PairwiseRejected")
+}
+
+model Tag {
+  id   String @id @default(cuid())
+  slug String @unique
+  name String
+
+  projects ProjectTag[]
+}
+
+model ProjectTag {
+  projectId String
+  tagId     String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, tagId])
+  @@index([tagId])
+}
+
+model Language {
+  id   String @id @default(cuid())
+  slug String @unique
+  name String
+
+  projects ProjectLanguage[]
+}
+
+model ProjectLanguage {
+  projectId  String
+  languageId String
+
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  language Language @relation(fields: [languageId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, languageId])
+  @@index([languageId])
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour
+// ---------------------------------------------------------------------------
+
+model Interaction {
+  id        String          @id @default(cuid())
+  userId    String
+  projectId String
+  sessionId String
+  type      InteractionType
+  /// Snapshot of the configured weight for `type` at write time.
+  weight    Float
+  dwellMs   Int?
+  createdAt DateTime        @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, projectId])
+  @@index([projectId])
+  @@index([sessionId])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+model OnboardingProfile {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  /// Topic keys chosen in onboarding (mapped to tags in application config).
+  topics               String[]           @default([])
+  /// Null means "surprise me".
+  difficultyPreference Difficulty?
+  durationPreference   DurationPreference @default(ANYTHING)
+  completedAt          DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// "Which would you rather build?" answers. Each row is one presented pair.
+model OnboardingPairwiseChoice {
+  id                String   @id @default(cuid())
+  userId            String
+  chosenProjectId   String
+  rejectedProjectId String
+  /// Order in which the pair was presented (0-based).
+  position          Int
+  createdAt         DateTime @default(now())
+
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chosenProject   Project @relation("PairwiseChosen", fields: [chosenProjectId], references: [id], onDelete: Cascade)
+  rejectedProject Project @relation("PairwiseRejected", fields: [rejectedProjectId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Recommendation diagnostics
+// ---------------------------------------------------------------------------
+
+model RecommendationRun {
+  id                    String  @id @default(cuid())
+  userId                String
+  sessionId             String?
+  /// Pipeline identifier, e.g. "hybrid-v1".
+  algorithm             String
+  explorationPreference Float
+  requestedLimit        Int
+
+  // Pipeline stage counts (real values recorded by the pipeline).
+  contentCandidateCount       Int
+  collaborativeCandidateCount Int
+  popularCandidateCount       Int
+  explorationCandidateCount   Int
+  uniqueCandidateCount        Int
+  filteredCandidateCount      Int
+  rankedCandidateCount        Int
+  finalCount                  Int
+
+  /// Exploration-adjusted ranking weights used for this run.
+  rankingWeights Json
+  createdAt      DateTime @default(now())
+
+  user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session Session?               @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  results RecommendationResult[]
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+}
+
+model RecommendationResult {
+  id                     String   @id @default(cuid())
+  runId                  String
+  projectId              String
+  rank                   Int
+  /// Rank before the diversification pass (null if diversification was skipped).
+  preDiversificationRank Int?
+  finalScore             Float
+  contentScore           Float
+  collaborativeScore     Float
+  sessionScore           Float
+  noveltyScore           Float
+  popularityScore        Float
+  /// Retrieval strategies that surfaced this candidate, e.g. ["content", "collaborative"].
+  candidateSources       String[] @default([])
+  /// Un-normalised retrieval signals kept for the recommendation inspector.
+  rawSignals             Json?
+  explanation            String
+
+  run     RecommendationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([runId, rank])
+  @@index([projectId])
+}

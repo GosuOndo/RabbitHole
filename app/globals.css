@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+/*
+  RabbitHole design tokens.
+  Restrained neutral palette with one accent; dark mode follows the OS setting.
+  Semantic tokens (surface/border/muted/accent/...) are what components use, so
+  the palette can change in one place.
+*/
+:root {
+  --background: #fafafa;
+  --surface: #ffffff;
+  --surface-raised: #f4f4f5;
+  --surface-sunken: #f1f1f2;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --foreground: #18181b;
+  --muted: #52525b;
+  --subtle: #8b8b94;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --accent-foreground: #ffffff;
+  --accent-soft: #ccfbf1;
+  --danger: #be123c;
+  --danger-soft: #ffe4e6;
+  --warning: #b45309;
+  --warning-soft: #fef3c7;
+  --info: #1d4ed8;
+  --info-soft: #dbeafe;
+  --ring: #0f766e;
+  --shadow-color: 0 0 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0c0c0e;
+    --surface: #131316;
+    --surface-raised: #1a1a1f;
+    --surface-sunken: #0f0f12;
+    --border: #26262c;
+    --border-strong: #35353d;
+    --foreground: #f4f4f5;
+    --muted: #a1a1aa;
+    --subtle: #6f6f78;
+    --accent: #2dd4bf;
+    --accent-strong: #5eead4;
+    --accent-foreground: #042f2e;
+    --accent-soft: #134e4a;
+    --danger: #fb7185;
+    --danger-soft: #4c0519;
+    --warning: #fbbf24;
+    --warning-soft: #451a03;
+    --info: #93c5fd;
+    --info-soft: #1e3a8a;
+    --ring: #2dd4bf;
+    --shadow-color: 0 0 0;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-card: 0.75rem;
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Visible, consistent focus for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 0.375rem;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .text-pretty {
+    text-wrap: pretty;
+  }
+}

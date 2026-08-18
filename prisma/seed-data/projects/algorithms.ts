@@ -1,0 +1,86 @@
+import type { SeedProject } from "../types";
+
+export const ALGORITHM_PROJECTS: SeedProject[] = [
+  {
+    slug: "pathfinding-visualizer",
+    title: "Build a pathfinding visualizer",
+    summary: "Watch BFS, Dijkstra, A* and greedy search explore a grid you draw walls on, step by step.",
+    description:
+      "Draw a grid, place a start and a goal, paint walls and weighted terrain, and animate how each algorithm expands the frontier: breadth-first search rippling outward, Dijkstra respecting weights, A* pulled toward the goal by its heuristic, greedy best-first rushing and sometimes failing. Seeing them side by side teaches more intuition than any lecture.\n\nAdd maze generation (recursive division, Prim's), diagonal movement with proper costs, jump-point search for open grids, and statistics for nodes expanded and path length. Then let users export and share boards. It is a beginner-friendly project that quietly covers priority queues, heuristics and admissibility.",
+    difficulty: "BEGINNER",
+    estimatedHours: 4,
+    popularity: 0.7,
+    tags: ["algorithms", "visualization", "frontend"],
+    languages: ["typescript", "javascript", "python"],
+    concepts: ["graph search (BFS, Dijkstra, A*)", "heuristics and admissibility", "priority queues", "maze generation", "animation of algorithm state"],
+    sourceUrl: "https://www.redblobgames.com/pathfinding/a-star/introduction.html",
+  },
+  {
+    slug: "file-compressor-huffman-lz77",
+    title: "Build a file compressor with Huffman coding and LZ77",
+    summary: "Implement the two halves of DEFLATE yourself and produce archives that a real unzip can read.",
+    description:
+      "Huffman coding assigns shorter bit codes to frequent symbols; LZ77 replaces repeated byte sequences with back-references. Implement each on its own first — a bit writer and reader, a frequency-driven tree, a sliding-window matcher with a hash chain — and measure the compression ratio on text, images and binaries. Then combine them and emit the DEFLATE format so gzip and unzip can decompress your output, which is a wonderful correctness oracle.\n\nOptimise the matcher (lazy matching, longer chains) and see ratio versus speed trade-offs first-hand, then explore arithmetic coding or Burrows–Wheeler if you want to go further. Few projects give such a concrete feel for information density.",
+    difficulty: "INTERMEDIATE",
+    estimatedHours: 8,
+    popularity: 0.6,
+    tags: ["algorithms", "systems", "cli"],
+    languages: ["c", "rust", "go", "python"],
+    concepts: ["bit-level I/O", "Huffman trees and canonical codes", "LZ77 sliding-window matching", "the DEFLATE format", "compression benchmarks"],
+    sourceUrl: "https://www.rfc-editor.org/rfc/rfc1951",
+  },
+  {
+    slug: "probabilistic-data-structures",
+    title: "Implement Bloom filters, HyperLogLog and Count-Min sketch",
+    summary: "Build the sketches that let big systems answer set, cardinality and frequency questions in tiny memory.",
+    description:
+      "A Bloom filter answers 'have I seen this?' with a bit array and k hash functions and no false negatives; HyperLogLog counts distinct items in a stream using a few kilobytes; a Count-Min sketch estimates frequencies. Implement all three, derive their parameters from a desired error rate, and verify empirically that the measured error matches the theory on a stream of millions of items.\n\nThen use them for something: deduplicating a crawl frontier, counting unique visitors per day and merging the sketches across days, finding heavy hitters in logs. Study the hash-function quality question and the standard-error formulas closely; they are elegant, and these structures show up in databases, CDNs and analytics systems everywhere.",
+    difficulty: "INTERMEDIATE",
+    estimatedHours: 6,
+    popularity: 0.5,
+    tags: ["data-structures", "algorithms", "data-engineering"],
+    languages: ["go", "rust", "python", "java"],
+    concepts: ["hashing and false-positive analysis", "cardinality estimation", "frequency sketches", "mergeable summaries", "empirical error measurement"],
+  },
+  {
+    slug: "spell-checker-with-edit-distance",
+    title: "Build a spell checker",
+    summary: "Suggest corrections with edit distance, a BK-tree for fast candidate search and a language model for ranking.",
+    description:
+      "Start with Peter Norvig's twenty-line corrector: generate all words within one or two edits and pick the most frequent one seen in a corpus. It works startlingly well. Then make it fast and scalable with a BK-tree or a symmetric-delete index so candidate lookup is sub-millisecond even for large dictionaries, and rank candidates with keyboard-distance and word-frequency models.\n\nExtend it to phrase-aware correction with bigram probabilities, real-time underlining in a text box, and per-user dictionaries. Evaluate on a labelled set of misspellings and report accuracy. It is a compact project that touches dynamic programming, metric trees and simple language modelling.",
+    difficulty: "BEGINNER",
+    estimatedHours: 3,
+    popularity: 0.5,
+    tags: ["algorithms", "nlp", "data-structures"],
+    languages: ["python", "typescript", "rust", "go"],
+    concepts: ["Levenshtein distance", "BK-trees and metric search", "candidate generation", "frequency-based ranking", "evaluation on labelled data"],
+    sourceUrl: "https://norvig.com/spell-correct.html",
+  },
+  {
+    slug: "route-planner-on-openstreetmap",
+    title: "Build a route planner on OpenStreetMap data",
+    summary: "Parse a real map extract into a road graph and compute driving or cycling routes with Dijkstra, A* and contraction hierarchies.",
+    description:
+      "Download an OpenStreetMap extract of your city, parse the ways and nodes into a weighted graph (respecting one-way streets, road types and speed limits), and compute shortest paths between two coordinates. Snap the start and end to the nearest road, render the route on a map, and produce turn-by-turn directions. Routing across your own neighbourhood is a very satisfying first result.\n\nThen make it fast: bidirectional search, A* with a landmark heuristic, and finally contraction hierarchies, which answer continental queries in milliseconds. Add profiles for walking and cycling, isochrone maps, and elevation. It is a rich blend of parsing, graph algorithms and geospatial data.",
+    difficulty: "INTERMEDIATE",
+    estimatedHours: 14,
+    popularity: 0.55,
+    tags: ["algorithms", "data-structures", "visualization"],
+    languages: ["rust", "go", "python", "java"],
+    concepts: ["OSM data parsing", "road graph construction", "shortest-path algorithms", "contraction hierarchies", "map rendering"],
+    sourceUrl: "https://www.openstreetmap.org/",
+  },
+  {
+    slug: "spatial-index-quadtree-rtree",
+    title: "Build a spatial index for nearest-neighbour queries",
+    summary: "Implement a quadtree and an R-tree, then answer 'what is near me?' over a million points in microseconds.",
+    description:
+      "Load a large set of points (cities, restaurants, GPS traces), build a quadtree that subdivides space adaptively, and answer range and k-nearest-neighbour queries by pruning whole subtrees. Then implement an R-tree with bounding rectangles and a proper split heuristic, which handles rectangles and updates better. Compare both against brute force and watch the speedup grow with data size.\n\nAdd geohash-based bucketing as a third approach, support the haversine metric for real coordinates, and visualise the tree structure over a map. Wire it into a small API for 'places near me'. Spatial indexes underpin maps, games and databases, and building two of them makes the trade-offs vivid.",
+    difficulty: "INTERMEDIATE",
+    estimatedHours: 6,
+    popularity: 0.4,
+    tags: ["data-structures", "algorithms"],
+    languages: ["typescript", "rust", "go", "python"],
+    concepts: ["quadtrees", "R-trees and node splitting", "k-nearest-neighbour search", "geohashing", "haversine distance"],
+  },
+];

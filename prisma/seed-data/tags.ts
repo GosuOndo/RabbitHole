@@ -1,0 +1,47 @@
+import type { SeedTag } from "./types";
+
+/**
+ * Catalog tags. Slugs are the stable identifiers used by projects, onboarding
+ * topic mappings and recommender features (`tag:<slug>`).
+ */
+export const TAGS: SeedTag[] = [
+  { slug: "systems", name: "Systems" },
+  { slug: "operating-systems", name: "Operating Systems" },
+  { slug: "concurrency", name: "Concurrency" },
+  { slug: "databases", name: "Databases" },
+  { slug: "networking", name: "Networking" },
+  { slug: "distributed-systems", name: "Distributed Systems" },
+  { slug: "p2p", name: "Peer-to-Peer" },
+  { slug: "backend", name: "Backend" },
+  { slug: "frontend", name: "Frontend" },
+  { slug: "web", name: "Web" },
+  { slug: "mobile", name: "Mobile" },
+  { slug: "cli", name: "CLI" },
+  { slug: "terminal", name: "Terminal UI" },
+  { slug: "devtools", name: "Developer Tools" },
+  { slug: "compilers", name: "Compilers" },
+  { slug: "programming-languages", name: "Programming Languages" },
+  { slug: "algorithms", name: "Algorithms" },
+  { slug: "data-structures", name: "Data Structures" },
+  { slug: "machine-learning", name: "Machine Learning" },
+  { slug: "nlp", name: "NLP" },
+  { slug: "computer-vision", name: "Computer Vision" },
+  { slug: "recommendation-systems", name: "Recommendation Systems" },
+  { slug: "information-retrieval", name: "Information Retrieval" },
+  { slug: "data-engineering", name: "Data Engineering" },
+  { slug: "visualization", name: "Visualization" },
+  { slug: "graphics", name: "Graphics" },
+  { slug: "webgl", name: "WebGL" },
+  { slug: "creative-coding", name: "Creative Coding" },
+  { slug: "procedural-generation", name: "Procedural Generation" },
+  { slug: "game-development", name: "Game Development" },
+  { slug: "multiplayer", name: "Multiplayer" },
+  { slug: "simulation", name: "Simulation" },
+  { slug: "audio", name: "Audio" },
+  { slug: "security", name: "Security" },
+  { slug: "cryptography", name: "Cryptography" },
+  { slug: "iot", name: "IoT" },
+  { slug: "embedded", name: "Embedded" },
+  { slug: "automation", name: "Automation" },
+  { slug: "emulation", name: "Emulation" },
+];
