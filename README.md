@@ -4,7 +4,7 @@ Personalized project discovery: RabbitHole recommends interesting software-engin
 
 The recommender is the product. It is a modular pipeline — user profile → candidate retrieval → ranking → session adjustment → diversification → explanation — built from understandable, testable functions with centralized configuration, offline evaluation and baseline comparison.
 
-> **Status:** Phases 1–2 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, and feature-based long-term/session profiles. Candidate retrieval, ranking and the recommendation feed arrive in the following phases.
+> **Status:** Phases 1–3 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and the first real recommender — content similarity, content + popularity candidate retrieval, cold-start handling, transparent ranking, deterministic explanations, the personalised `/discover` feed, saved projects and similar projects. Collaborative filtering, exploration/novelty/diversification, session-aware re-ranking, Insights diagnostics and offline evaluation arrive in the following phases.
 
 ## Technology stack
 
@@ -110,10 +110,20 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 - `lib/recommender/features.ts` — project → namespaced feature vector (`tag:`, `lang:`, `difficulty:`, `duration:`).
 - `lib/recommender/decay.ts` — half-life decay `0.5 ** (ageDays / halfLifeDays)`.
 - `lib/recommender/profile.ts` — signed feature profiles: `raw[f] += weight(type) * decay * projectFeature[f]`, plus explicit onboarding signals; L2-normalised `vector` for similarity and max-abs `strengths` for display; long-term vs session builders.
+- `lib/recommender/similarity.ts` — cosine similarity for sparse signed vectors (0 for empty/zero-norm inputs).
+- `lib/recommender/session.ts` — effective profile = fixed blend of long-term and session vectors (`session.baseWeight`; adaptive weighting comes in Phase 6).
+- `lib/recommender/content.ts` / `popularity.ts` — content candidates (cosine ≥ `retrieval.minContentAffinity`, top ~50) and popularity candidates (`priorWeight·seedPrior + behaviorWeight·log1p(Σ positive weights)/max`, top ~15), both excluding terminal-state projects.
+- `lib/recommender/candidates.ts` — merge retrieval outputs per project (all sources + raw signals kept) and filter with reasons.
+- `lib/recommender/rank.ts` — `score = clamp01(Σ weight[c]·signal[c])` over the components a phase has (Phase 3: content + popularity, renormalised from `rankingWeights`; popularity boosted for cold start), saved projects demoted; ties: popularity prior, then slug.
+- `lib/recommender/explain.ts` — deterministic explanations from real overlapping features (taste / onboarding / session / fit / popularity), no collaborative claims.
+- `lib/recommender/similar.ts` — profile-independent project-to-project similarity for "Similar projects".
+- `lib/recommender/recommend.ts` — the orchestrator: profile → retrieve → merge → filter → signals → rank → top-K → explain (pure pipeline + injectable loaders).
+- `lib/recommendations/` — Prisma loaders (catalog with vectors, popularity evidence) and feed / similar / detail-context services.
+- `lib/saved/` — saved-project state, filters and sorting.
 - `lib/sessions/` — server-side session resolution (30-minute inactivity timeout, explicit "start new session").
 - `lib/interactions/` — interaction recording with server-owned weights, zod schemas, per-project state derivation.
 - `lib/onboarding/` — topic → tag mapping, curated cross-domain pairwise choices, persistence.
-- `lib/profile/` — profile snapshot (long-term + session profiles, statistics) and settings updates.
+- `lib/profile/` — profile data loader + snapshot (long-term + session profiles, statistics) and settings updates.
 - `prisma/schema.prisma` — users, sessions, interactions, catalog (projects/tags/languages), onboarding answers and recommendation diagnostics.
 - `prisma/seed-data/` — the hand-authored catalog and the synthetic-population generator.
 
@@ -121,6 +131,7 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /api/recommendations?limit=10` | Personalised feed (rank, match score, score breakdown, candidate sources, explanation, project); 409 until onboarding is complete |
 | `POST /api/interactions` | Record `{ projectId, type, dwellMs? }` for the demo user; the server resolves the session and the weight |
 | `GET /api/profile` | Onboarding state, exploration preference, long-term and session profiles, statistics, active session |
 | `PATCH /api/profile` | Update supported settings (`explorationPreference` in [0, 1]) |
@@ -132,11 +143,13 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 ## Implemented algorithms
 
 - Feature-based user profiles (Phase 2): decayed, weighted aggregation of project features from interactions, explicit onboarding prior (topics, pairwise choices, difficulty/duration), signed normalisation, separate long-term and session profiles.
-- Planned: cosine content similarity, item-item collaborative filtering, popularity priors, exploration retrieval, weighted hybrid ranking with exploration-adjusted weights, session/long-term blending, MMR-style diversification, deterministic explanations, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
+- Content-based recommendation (Phase 3): cosine similarity between the effective profile and project feature vectors, content + popularity candidate retrieval, terminal-state filtering, cold-start weighting, transparent weighted ranking with deterministic tie-breaks, deterministic explanations, project-to-project similar projects.
+- Planned: item-item collaborative filtering, exploration retrieval + novelty, exploration-adjusted weights, MMR-style diversification, adaptive session blending, Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
 
 ## Current limitations
 
-- The recommendation feed, saved-projects page and recommendation diagnostics are not yet implemented (Phases 3–8); `/discover` shows a catalog preview.
+- Collaborative filtering, exploration/novelty/diversification, adaptive session ranking, the Insights recommendation inspector and offline evaluation are not yet implemented (Phases 4–8).
+- The exploration preference is stored but does not yet change recommendations (Phase 5).
 - Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).
 - Local development only; no deployment configuration.

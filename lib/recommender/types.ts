@@ -40,6 +40,11 @@ export interface CatalogProject {
   languageSlugs: readonly string[];
 }
 
+/** A catalog project together with its content feature vector (see features.ts). */
+export interface ProjectVector extends CatalogProject {
+  vector: FeatureVector;
+}
+
 /** Minimal interaction shape used by profile building, CF and evaluation. */
 export interface InteractionEvent {
   userId: string;

@@ -1,15 +1,19 @@
 /**
- * User profile snapshot: loads behavioural + onboarding data from the database,
- * runs the pure profile functions, and returns labelled views for the API and
- * the Insights page. No scoring or profile maths lives here — see
- * lib/recommender/profile.ts.
+ * User profile data: loads behavioural + onboarding data from the database and
+ * runs the pure profile functions.
+ *
+ *   loadUserProfileData   → raw InterestProfiles, project states, labels
+ *                           (consumed by the recommender and the snapshot below)
+ *   getUserProfileSnapshot → labelled views + statistics for /api/profile and Insights
+ *
+ * No scoring or profile maths lives here — see lib/recommender/profile.ts.
  */
 
 import type { InteractionType } from "@/generated/prisma/enums";
 import { InteractionType as InteractionTypeEnum } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/db";
 import { DIFFICULTY_LABELS } from "@/lib/format";
-import { deriveProjectStates } from "@/lib/interactions/project-state";
+import { deriveProjectStates, type ProjectState } from "@/lib/interactions/project-state";
 import { getOnboardingState, type OnboardingStateView } from "@/lib/onboarding/onboarding-service";
 import { getOnboardingTopic, topicFeatureVector } from "@/lib/onboarding/topics";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
@@ -24,7 +28,7 @@ import {
   type ProfileInteraction,
 } from "@/lib/recommender/profile";
 import type { FeatureVector } from "@/lib/recommender/types";
-import { sessionService } from "@/lib/sessions";
+import { sessionService, type SessionRecord } from "@/lib/sessions";
 
 export interface ProfileFeatureView {
   id: string;
@@ -84,11 +88,24 @@ export interface UserProfileSnapshot {
   computedAt: string;
 }
 
+export type LabelMaps = { tags: Map<string, string>; languages: Map<string, string> };
+
+export interface UserProfileData {
+  user: { id: string; name: string; explorationPreference: number; onboardingCompleted: boolean };
+  /** Full interaction history, oldest first. */
+  interactions: { projectId: string; sessionId: string; type: InteractionType; createdAt: Date }[];
+  onboarding: OnboardingStateView;
+  activeSession: SessionRecord | null;
+  longTerm: InterestProfile;
+  session: InterestProfile;
+  /** Per-project behavioural state derived from the full history. */
+  states: Map<string, ProjectState>;
+  labels: LabelMaps;
+}
+
 const PROFILE_FEATURE_LIMIT = 12;
 
-type LabelMaps = { tags: Map<string, string>; languages: Map<string, string> };
-
-function labelFor(family: FeatureFamily, key: string, labels: LabelMaps): string {
+export function labelForFeature(family: FeatureFamily, key: string, labels: LabelMaps): string {
   switch (family) {
     case "tag":
       return labels.tags.get(key) ?? key;
@@ -101,9 +118,21 @@ function labelFor(family: FeatureFamily, key: string, labels: LabelMaps): string
   }
 }
 
+/** Loads tag/language display names once (small tables). */
+export async function loadLabelMaps(): Promise<LabelMaps> {
+  const [tagRows, languageRows] = await Promise.all([
+    prisma.tag.findMany({ select: { slug: true, name: true } }),
+    prisma.language.findMany({ select: { slug: true, name: true } }),
+  ]);
+  return {
+    tags: new Map(tagRows.map((t) => [t.slug, t.name])),
+    languages: new Map(languageRows.map((l) => [l.slug, l.name])),
+  };
+}
+
 function toProfileView(profile: InterestProfile, labels: LabelMaps): InterestProfileView {
   const view = (features: ReturnType<typeof rankFeatures>): ProfileFeatureView[] =>
-    features.map((f) => ({ ...f, label: labelFor(f.family, f.key, labels) }));
+    features.map((f) => ({ ...f, label: labelForFeature(f.family, f.key, labels) }));
   return {
     isEmpty: profile.norm === 0,
     interactionCount: profile.interactionCount,
@@ -147,8 +176,12 @@ async function loadProjectFeatures(projectIds: readonly string[]): Promise<Map<s
   );
 }
 
-export async function getUserProfileSnapshot(userId: string, now: Date = new Date()): Promise<UserProfileSnapshot> {
-  const [user, interactions, onboarding, activeSession, tagRows, languageRows] = await Promise.all([
+/**
+ * Loads everything needed to describe a user's taste: full history, onboarding
+ * answers, active session, and the computed long-term and session profiles.
+ */
+export async function loadUserProfileData(userId: string, now: Date = new Date()): Promise<UserProfileData> {
+  const [user, interactions, onboarding, activeSession, labels] = await Promise.all([
     prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { id: true, name: true, explorationPreference: true, onboardingCompleted: true },
@@ -160,13 +193,8 @@ export async function getUserProfileSnapshot(userId: string, now: Date = new Dat
     }),
     getOnboardingState(userId),
     sessionService.getActive(userId, now),
-    prisma.tag.findMany({ select: { slug: true, name: true } }),
-    prisma.language.findMany({ select: { slug: true, name: true } }),
+    loadLabelMaps(),
   ]);
-  const labels: LabelMaps = {
-    tags: new Map(tagRows.map((t) => [t.slug, t.name])),
-    languages: new Map(languageRows.map((l) => [l.slug, l.name])),
-  };
 
   // One batched fetch for every project referenced by history or onboarding.
   const projectIds = new Set<string>(interactions.map((i) => i.projectId));
@@ -209,13 +237,25 @@ export async function getUserProfileSnapshot(userId: string, now: Date = new Dat
       }
     : null;
 
-  const longTerm = buildLongTermProfile({ interactions: historical, onboarding: onboardingSignals, now });
-  const session = buildSessionProfile({ interactions: sessionInteractions, now });
+  return {
+    user,
+    interactions,
+    onboarding,
+    activeSession,
+    longTerm: buildLongTermProfile({ interactions: historical, onboarding: onboardingSignals, now }),
+    session: buildSessionProfile({ interactions: sessionInteractions, now }),
+    states: deriveProjectStates(interactions),
+    labels,
+  };
+}
+
+export async function getUserProfileSnapshot(userId: string, now: Date = new Date()): Promise<UserProfileSnapshot> {
+  const data = await loadUserProfileData(userId, now);
+  const { interactions, activeSession, states, labels } = data;
 
   // Statistics from the full history (not just the decay window).
   const byType = emptyByType();
   for (const i of interactions) byType[i.type] += 1;
-  const states = deriveProjectStates(interactions);
   const currentSessionInteractions = activeSession ? interactions.filter((i) => i.sessionId === activeSession.id).length : 0;
   const stats: ProfileStats = {
     totalInteractions: interactions.length,
@@ -229,8 +269,8 @@ export async function getUserProfileSnapshot(userId: string, now: Date = new Dat
   };
 
   return {
-    user,
-    onboarding,
+    user: data.user,
+    onboarding: data.onboarding,
     session: activeSession
       ? {
           id: activeSession.id,
@@ -240,8 +280,8 @@ export async function getUserProfileSnapshot(userId: string, now: Date = new Dat
           interactionCount: currentSessionInteractions,
         }
       : null,
-    longTermProfile: toProfileView(longTerm, labels),
-    sessionProfile: toProfileView(session, labels),
+    longTermProfile: toProfileView(data.longTerm, labels),
+    sessionProfile: toProfileView(data.session, labels),
     stats,
     config: {
       halfLifeDays: RECOMMENDER_CONFIG.timeDecay.halfLifeDays,

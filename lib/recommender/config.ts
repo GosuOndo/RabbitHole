@@ -104,6 +104,49 @@ export const RECOMMENDER_CONFIG = {
     exploration: 15,
   } satisfies Record<CandidateSource, number>,
 
+  /** Retrieval-stage thresholds. */
+  retrieval: {
+    /** Content candidates need at least this cosine affinity with the effective profile. */
+    minContentAffinity: 0.01,
+  },
+
+  /**
+   * Popularity = priorWeight * seedPrior + behaviorWeight * behavioralScore, where
+   * behavioralScore = log1p(Σ positive interaction weights on the project) / max over catalog.
+   * The log tames heavy tails from synthetic users; both terms live in [0, 1].
+   */
+  popularity: {
+    priorWeight: 0.4,
+    behaviorWeight: 0.6,
+  },
+
+  /**
+   * Cold start: profiles with fewer weighted interactions than this are "cold";
+   * popularity gets a heavier hand so a thin profile does not over-fit, while
+   * onboarding-derived content still orders the feed.
+   */
+  coldStart: {
+    maxInteractions: 3,
+    /** Multiplies the popularity ranking weight before renormalisation. */
+    popularityWeightMultiplier: 3,
+  },
+
+  /** Deterministic explanation thresholds. */
+  explanation: {
+    /** Content affinity needed before "because you like…" is claimed. */
+    minContentAffinity: 0.2,
+    /** Session affinity needed before "you recently explored…" is claimed. */
+    minSessionAffinity: 0.25,
+    /** Popularity score needed before "popular with RabbitHole users" is claimed. */
+    minPopularity: 0.5,
+    maxFeaturesPerSentence: 2,
+  },
+
+  /** "Similar projects" on the detail page (project-to-project cosine). */
+  similarProjects: {
+    count: 5,
+  },
+
   /**
    * Base ranking weights (sum to 1). Adjusted per request by the user's
    * exploration preference (see `exploration.weightSlopes`).

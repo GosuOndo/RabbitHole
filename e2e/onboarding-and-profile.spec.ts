@@ -60,6 +60,13 @@ test.describe("onboarding", () => {
     await expect(page.getByText("Systems, Databases, Networking")).toBeVisible();
     await page.getByRole("button", { name: "Finish and start exploring" }).click();
     await expect(page).toHaveURL(/\/discover$/);
+
+    // Cold start: zero interactions, onboarding-only profile → personalised recommendations already.
+    const cards = page.getByTestId("recommendation-card");
+    await expect(cards.first()).toBeVisible();
+    expect(await cards.count()).toBeGreaterThanOrEqual(5);
+    await expect(page.getByTestId("feed-context")).toContainText("Still learning your taste");
+    await expect(cards.first().getByTestId("recommendation-reason")).toContainText("Based on the interests you selected during onboarding");
   });
 
   test("onboarding persists after reload and seeds the long-term profile", async ({ page, request }) => {

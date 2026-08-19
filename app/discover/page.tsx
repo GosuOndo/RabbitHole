@@ -1,54 +1,37 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import { DatabaseSetupNotice } from "@/components/database-setup-notice";
-import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
-import { ProjectCard } from "@/components/project-card";
-import { listProjects } from "@/lib/catalog/queries";
+import { RecommendationFeed } from "@/components/recommendation-feed";
 import { isDatabaseConfigured } from "@/lib/db";
+import { getOrCreateDemoUser } from "@/lib/demo-user";
+import { getRecommendationFeed } from "@/lib/recommendations/recommendation-service";
 
 export const metadata: Metadata = { title: "Discover" };
 export const dynamic = "force-dynamic";
 
 /**
- * Phase 1: catalog preview so the app has real content end to end. Phase 3
- * replaces this grid with the personalised recommendation feed.
+ * The personalised feed. Recommendations are computed server-side through the
+ * recommender pipeline and handed to the client feed component, which records
+ * impressions, sends feedback and refills from /api/recommendations.
  */
 export default async function DiscoverPage() {
   if (!isDatabaseConfigured()) {
     return <DatabaseSetupNotice />;
   }
-  const projects = await listProjects();
+  const user = await getOrCreateDemoUser();
+  if (!user.onboardingCompleted) redirect("/onboarding");
+
+  const feed = await getRecommendationFeed(user.id);
 
   return (
     <div>
       <PageHeader
         eyebrow="Discover"
         title="What should you build next?"
-        description={
-          <>
-            Catalog preview: {projects.length} project ideas, most popular first. Personalised recommendations, explanations and feedback
-            actions arrive in Phase 3.
-          </>
-        }
+        description="Ranked by how well each project matches your taste profile. Scores are match scores, not probabilities — open “Why?” on any card to see the signals."
       />
-      {projects.length === 0 ? (
-        <EmptyState
-          title="The catalog is empty."
-          description={
-            <>
-              Run <code className="font-mono text-foreground">npm run seed</code> to load the project catalog.
-            </>
-          }
-        />
-      ) : (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {projects.map((project) => (
-            <li key={project.id}>
-              <ProjectCard project={project} />
-            </li>
-          ))}
-        </ul>
-      )}
+      <RecommendationFeed initial={feed} />
     </div>
   );
 }
