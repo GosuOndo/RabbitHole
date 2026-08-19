@@ -4,7 +4,7 @@ Personalized project discovery: RabbitHole recommends interesting software-engin
 
 The recommender is the product. It is a modular pipeline — user profile → candidate retrieval → ranking → session adjustment → diversification → explanation — built from understandable, testable functions with centralized configuration, offline evaluation and baseline comparison.
 
-> **Status:** Phases 1–3 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and the first real recommender — content similarity, content + popularity candidate retrieval, cold-start handling, transparent ranking, deterministic explanations, the personalised `/discover` feed, saved projects and similar projects. Collaborative filtering, exploration/novelty/diversification, session-aware re-ranking, Insights diagnostics and offline evaluation arrive in the following phases.
+> **Status:** Phases 1–4 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and a genuine hybrid recommender — content similarity, item-item collaborative filtering and popularity as three separate retrieval sources merged into one candidate pool, hybrid ranking with an honest score breakdown, deterministic explanations, the personalised `/discover` feed, saved projects and similar projects. Exploration/novelty/diversification, adaptive session-aware re-ranking, Insights diagnostics and offline evaluation arrive in the following phases.
 
 ## Technology stack
 
@@ -97,11 +97,13 @@ npm start
 
 ```
 User → Interactions → User profile (long-term + session)
-     → Candidate retrieval (content · collaborative · popular · exploration)
-     → Merge / dedupe / filter → Ranking (weighted, explainable score breakdown)
-     → Session adjustment → Diversification → Top-K + explanations
-     → New feedback → updated recommendations
+     → Candidate retrieval: content (~50) + item-item collaborative (~30) + popularity (~15)
+     → Merge (all sources kept) / dedupe / filter (DISLIKE · BUILD · COMPLETE never surface)
+     → Hybrid ranking (content · collaborative · popularity, weights renormalised over available signals)
+     → Top-K + deterministic explanations → impressions / feedback → updated recommendations
 ```
+
+Collaborative filtering in one paragraph: each user's *current state* per project (from `deriveProjectStates`) becomes a positive signal — `(completed ? 5 : built ? 4 : 0) + (saved ? 2 : 0) + (shared ? 3 : 0) + (opened ? 0.5 : 0)`, 0 when disliked, IMPRESSION never counts, each state counts once. Item vectors over users (target user left out) are compared with shrunk cosine `cos(v_i, v_j) × overlap / (overlap + 2)`; the user's positive projects seed retrieval, `evidence(c) = Σ sim(seed, c) × seedWeight`, normalised by the maximum and scaled by a sparse-history confidence `min(1, Σ seedWeight / 6)`; top 30 become collaborative candidates. Users without behavioural seeds simply have no collaborative component (content + popularity only) — nothing is fabricated.
 
 Layering: React/UI → API routes → services (`lib/sessions`, `lib/interactions`, `lib/onboarding`, `lib/profile`) → pure recommender functions (`lib/recommender`) → Prisma (`lib/db.ts`).
 
@@ -113,9 +115,10 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 - `lib/recommender/similarity.ts` — cosine similarity for sparse signed vectors (0 for empty/zero-norm inputs).
 - `lib/recommender/session.ts` — effective profile = fixed blend of long-term and session vectors (`session.baseWeight`; adaptive weighting comes in Phase 6).
 - `lib/recommender/content.ts` / `popularity.ts` — content candidates (cosine ≥ `retrieval.minContentAffinity`, top ~50) and popularity candidates (`priorWeight·seedPrior + behaviorWeight·log1p(Σ positive weights)/max`, top ~15), both excluding terminal-state projects.
+- `lib/recommender/collaborative.ts` — item-item collaborative filtering: current-state collaborative signal, item vectors over users, shrunk cosine neighbours, seed-weighted evidence aggregation, top ~30 collaborative candidates with supporting-seed diagnostics.
 - `lib/recommender/candidates.ts` — merge retrieval outputs per project (all sources + raw signals kept) and filter with reasons.
-- `lib/recommender/rank.ts` — `score = clamp01(Σ weight[c]·signal[c])` over the components a phase has (Phase 3: content + popularity, renormalised from `rankingWeights`; popularity boosted for cold start), saved projects demoted; ties: popularity prior, then slug.
-- `lib/recommender/explain.ts` — deterministic explanations from real overlapping features (taste / onboarding / session / fit / popularity), no collaborative claims.
+- `lib/recommender/rank.ts` — `score = clamp01(Σ weight[c]·signal[c])` over the components available for the user (content 0.45 / collaborative 0.25 / popularity 0.10 renormalised → 0.5625 / 0.3125 / 0.125; content + popularity only when there is no behavioural history; popularity boosted for cold start); absent evidence contributes 0 and is reported as `null`; saved projects demoted; ties: popularity prior, then slug.
+- `lib/recommender/explain.ts` — deterministic explanations from real signals (taste / onboarding / session / collaborative naming the user's own seed projects / fit / popularity).
 - `lib/recommender/similar.ts` — profile-independent project-to-project similarity for "Similar projects".
 - `lib/recommender/recommend.ts` — the orchestrator: profile → retrieve → merge → filter → signals → rank → top-K → explain (pure pipeline + injectable loaders).
 - `lib/recommendations/` — Prisma loaders (catalog with vectors, popularity evidence) and feed / similar / detail-context services.
@@ -144,11 +147,12 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 
 - Feature-based user profiles (Phase 2): decayed, weighted aggregation of project features from interactions, explicit onboarding prior (topics, pairwise choices, difficulty/duration), signed normalisation, separate long-term and session profiles.
 - Content-based recommendation (Phase 3): cosine similarity between the effective profile and project feature vectors, content + popularity candidate retrieval, terminal-state filtering, cold-start weighting, transparent weighted ranking with deterministic tie-breaks, deterministic explanations, project-to-project similar projects.
-- Planned: item-item collaborative filtering, exploration retrieval + novelty, exploration-adjusted weights, MMR-style diversification, adaptive session blending, Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
+- Item-item collaborative filtering + hybrid ranking (Phase 4): behavioural item vectors over users, shrunk cosine item similarity, seed-weighted collaborative retrieval with sparse-history confidence, three-source candidate merge, hybrid ranking with renormalised weights and a nullable per-component breakdown, collaborative explanations that name real seed projects.
+- Planned: exploration retrieval + novelty, exploration-adjusted weights, MMR-style diversification, adaptive session blending, Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
 
 ## Current limitations
 
-- Collaborative filtering, exploration/novelty/diversification, adaptive session ranking, the Insights recommendation inspector and offline evaluation are not yet implemented (Phases 4–8).
+- Exploration/novelty/diversification, adaptive session ranking, the Insights recommendation inspector and offline evaluation are not yet implemented (Phases 5–8).
 - The exploration preference is stored but does not yet change recommendations (Phase 5).
 - Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).

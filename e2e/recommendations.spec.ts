@@ -9,9 +9,23 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 test.describe.configure({ mode: "serial" });
 
 type FeedResponse = {
-  items: { rank: number; score: number; project: { id: string; slug: string; title: string }; explanation: { text: string }; sources: string[]; breakdown: { content: number; popularity: number } }[];
-  pipeline: { contentCandidates: number; popularCandidates: number; uniqueCandidates: number; final: number };
-  context: { coldStart: boolean; profileEmpty: boolean };
+  items: {
+    rank: number;
+    score: number;
+    project: { id: string; slug: string; title: string };
+    explanation: { text: string; primary: string; factors: { kind: string; features: { id: string; label: string }[] }[] };
+    sources: string[];
+    breakdown: { content: number | null; collaborative: number | null; popularity: number | null };
+    weights: { content?: number; collaborative?: number; popularity?: number };
+    collaborative: { score: number; confidence: number; seeds: { projectId: string; slug: string; title: string; state: string; similarity: number }[] } | null;
+  }[];
+  pipeline: { contentCandidates: number; collaborativeCandidates: number; popularCandidates: number; uniqueCandidates: number; afterFiltering: number; ranked: number; final: number };
+  context: {
+    coldStart: boolean;
+    profileEmpty: boolean;
+    collaborative: { available: boolean; seedCount: number; confidence: number; candidatesWithEvidence: number };
+    components: string[];
+  };
 };
 
 async function ensureOnboarded(request: APIRequestContext): Promise<void> {
@@ -63,6 +77,39 @@ test.describe("recommendation API", () => {
     const capped = await fetchFeed(request, 999).catch(() => null);
     expect(capped).toBeNull();
     expect((await request.get("/api/recommendations?limit=999")).status()).toBe(400);
+  });
+
+  test("exposes a typed hybrid score breakdown and collaborative evidence for a user with behavioural history", async ({ request }) => {
+    // By now the demo user has saved / opened projects (onboarding-and-profile.spec.ts), so seeds exist.
+    const profile = await (await request.get("/api/profile")).json();
+    expect(profile.stats.savedProjects + profile.stats.byType.OPEN).toBeGreaterThan(0);
+
+    const feed = await fetchFeed(request, 10);
+    expect(typeof feed.pipeline.collaborativeCandidates).toBe("number");
+    expect(feed.context.collaborative.available).toBe(true);
+    expect(feed.context.collaborative.seedCount).toBeGreaterThan(0);
+    expect(feed.context.components).toEqual(["content", "collaborative", "popularity"]);
+    for (const item of feed.items) {
+      for (const key of ["content", "collaborative", "popularity"] as const) {
+        const value = item.breakdown[key];
+        expect(value === null || (typeof value === "number" && Number.isFinite(value))).toBe(true);
+      }
+      expect(item.weights.content).toBeGreaterThan(item.weights.collaborative ?? 0);
+      if (item.sources.includes("collaborative")) {
+        expect(item.breakdown.collaborative).not.toBeNull();
+        expect(item.breakdown.collaborative!).toBeGreaterThan(0);
+        expect(item.collaborative).not.toBeNull();
+        expect(item.collaborative!.seeds.length).toBeGreaterThan(0);
+      } else {
+        expect(item.breakdown.collaborative).toBeNull();
+        expect(item.collaborative).toBeNull();
+        expect(item.explanation.text).not.toMatch(/People who liked/);
+      }
+    }
+    const collaborativeItems = feed.items.filter((item) => item.sources.includes("collaborative"));
+    expect(collaborativeItems.length).toBeGreaterThan(0);
+    // Popularity-only items exist independently of collaborative evidence.
+    expect(feed.pipeline.popularCandidates).toBeGreaterThan(0);
   });
 
   test("is deterministic for the same state", async ({ request }) => {
@@ -123,9 +170,23 @@ test.describe("discover feed", () => {
     const explanation = first.getByTestId("recommendation-explanation");
     await expect(explanation).toBeVisible();
     await expect(explanation).toContainText("Content affinity");
+    await expect(explanation).toContainText("Collaborative signal");
     await expect(explanation).toContainText("Match score");
     await first.getByRole("button", { name: "Why?" }).click();
     await expect(explanation).toBeHidden();
+  });
+
+  test("a card with collaborative evidence lists the user's own seed projects in the breakdown", async ({ page, request }) => {
+    const feed = await fetchFeed(request, 10);
+    const collaborative = feed.items.find((item) => item.sources.includes("collaborative"));
+    expect(collaborative).toBeDefined();
+    await page.goto("/discover");
+    const card = page.locator(`[data-testid="recommendation-card"][data-project-slug="${collaborative!.project.slug}"]`);
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "Why?" }).click();
+    const evidence = card.getByTestId("collaborative-evidence");
+    await expect(evidence).toBeVisible();
+    await expect(evidence).toContainText(collaborative!.collaborative!.seeds[0]!.title);
   });
 
   test("saving from the feed puts the project on /saved with working filters", async ({ page, request }) => {

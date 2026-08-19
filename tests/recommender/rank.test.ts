@@ -42,7 +42,8 @@ describe("rankCandidates", () => {
     expect(ranked.map((r) => r.projectId)).toEqual(["strong", "weak"]);
     expect(ranked[0]!.rank).toBe(1);
     expect(ranked[0]!.score).toBeCloseTo(weights.content! * 0.8 + weights.popularity! * 0.5, 10);
-    expect(ranked[0]!.breakdown).toEqual({ content: 0.8, collaborative: 0, session: 0, novelty: 0, popularity: 0.5 });
+    // Absent signals are reported as null (no evidence), not as zeros.
+    expect(ranked[0]!.breakdown).toEqual({ content: 0.8, collaborative: null, session: null, novelty: null, popularity: 0.5 });
   });
 
   it("uses deterministic tie-breaks: popularity prior desc, then slug asc", () => {
@@ -75,10 +76,84 @@ describe("rankCandidates", () => {
       expect(Number.isFinite(r.score)).toBe(true);
       expect(r.score).toBeGreaterThanOrEqual(0);
       expect(r.score).toBeLessThanOrEqual(1);
-      for (const value of Object.values(r.breakdown)) expect(Number.isFinite(value)).toBe(true);
+      for (const value of Object.values(r.breakdown)) expect(value === null || Number.isFinite(value)).toBe(true);
     }
     expect(ranked.find((r) => r.projectId === "negative")!.score).toBe(0);
     // Non-finite signals are neutralised to 0 rather than clamped or propagated.
-    expect(ranked.find((r) => r.projectId === "broken")!.breakdown).toEqual({ content: 0, collaborative: 0, session: 0, novelty: 0, popularity: 0 });
+    expect(ranked.find((r) => r.projectId === "broken")!.breakdown).toEqual({ content: 0, collaborative: null, session: null, novelty: null, popularity: 0 });
+  });
+});
+
+describe("hybrid ranking with collaborative evidence", () => {
+  const base = RECOMMENDER_CONFIG.rankingWeights;
+  const hybrid = resolveRankingWeights(["content", "collaborative", "popularity"]);
+  const collab = (id: string, content: number, collaborative: number | undefined, popularity: number, extra: Partial<RankingInput> = {}): RankingInput => ({
+    projectId: id,
+    slug: id,
+    popularityPrior: 0.5,
+    sources: collaborative === undefined ? ["content"] : ["content", "collaborative"],
+    signals: { content, ...(collaborative === undefined ? {} : { collaborative }), popularity },
+    ...extra,
+  });
+
+  it("renormalises content/collaborative/popularity to ≈ 0.5625 / 0.3125 / 0.125", () => {
+    const total = base.content + base.collaborative + base.popularity;
+    expect(hybrid.content).toBeCloseTo(base.content / total, 10);
+    expect(hybrid.collaborative).toBeCloseTo(base.collaborative / total, 10);
+    expect(hybrid.popularity).toBeCloseTo(base.popularity / total, 10);
+    expect(hybrid.content).toBeCloseTo(0.5625, 4);
+    expect(hybrid.collaborative).toBeCloseTo(0.3125, 4);
+    expect(hybrid.popularity).toBeCloseTo(0.125, 4);
+  });
+
+  it("lets sufficiently strong collaborative evidence overtake a stronger content match", () => {
+    const ranked = rankCandidates([collab("A", 0.8, 0.05, 0.2), collab("B", 0.65, 0.95, 0.2)], { weights: hybrid });
+    expect(ranked.map((r) => r.projectId)).toEqual(["B", "A"]);
+    const b = ranked[0]!;
+    expect(b.score).toBeCloseTo(hybrid.content! * 0.65 + hybrid.collaborative! * 0.95 + hybrid.popularity! * 0.2, 10);
+    expect(b.breakdown.collaborative).toBe(0.95);
+  });
+
+  it("still lets strong content win when collaborative evidence is comparable", () => {
+    const ranked = rankCandidates([collab("A", 0.9, 0.4, 0.2), collab("B", 0.5, 0.5, 0.2)], { weights: hybrid });
+    expect(ranked[0]!.projectId).toBe("A");
+  });
+
+  it("does not let popularity alone dominate a normal user", () => {
+    const ranked = rankCandidates([collab("popular", 0.1, 0.05, 1.0), collab("relevant", 0.7, 0.6, 0.1)], { weights: hybrid });
+    expect(ranked[0]!.projectId).toBe("relevant");
+  });
+
+  it("treats a candidate without collaborative evidence as null (0 contribution) rather than negative", () => {
+    const ranked = rankCandidates([collab("with", 0.6, 0.3, 0.3), collab("without", 0.6, undefined, 0.3)], { weights: hybrid });
+    expect(ranked[0]!.projectId).toBe("with");
+    const without = ranked.find((r) => r.projectId === "without")!;
+    expect(without.breakdown.collaborative).toBeNull();
+    expect(without.score).toBeCloseTo(hybrid.content! * 0.6 + hybrid.popularity! * 0.3, 10);
+    expect(without.score).toBeGreaterThan(0);
+  });
+
+  it("keeps saved-item demotion, bounds and deterministic ties with the collaborative component present", () => {
+    const ranked = rankCandidates(
+      [collab("saved", 0.9, 0.9, 0.9, { saved: true }), collab("fresh", 0.9, 0.9, 0.9), collab("b", 0.4, 0.4, 0.4), collab("a", 0.4, 0.4, 0.4), collab("nan", Number.NaN, Number.NaN, 0.5)],
+      { weights: hybrid },
+    );
+    expect(ranked.map((r) => r.projectId)).toEqual(["fresh", "saved", "a", "b", "nan"]);
+    expect(ranked[1]!.score).toBeCloseTo(ranked[0]!.score * RECOMMENDER_CONFIG.filtering.savedProjectScoreMultiplier, 10);
+    for (const r of ranked) {
+      expect(Number.isFinite(r.score)).toBe(true);
+      expect(r.score).toBeGreaterThanOrEqual(0);
+      expect(r.score).toBeLessThanOrEqual(1);
+    }
+    expect(ranked.find((r) => r.projectId === "nan")!.breakdown.collaborative).toBe(0);
+  });
+
+  it("falls back to content + popularity weights when the user has no collaborative evidence at all", () => {
+    const noCollab = resolveRankingWeights(["content", "popularity"]);
+    expect(noCollab.collaborative).toBeUndefined();
+    expect((noCollab.content ?? 0) + (noCollab.popularity ?? 0)).toBeCloseTo(1, 10);
+    const cold = resolveRankingWeights(["content", "collaborative", "popularity"], { coldStart: true });
+    expect(cold.popularity!).toBeGreaterThan(hybrid.popularity!);
+    expect(cold.content!).toBeGreaterThan(cold.collaborative!);
   });
 });

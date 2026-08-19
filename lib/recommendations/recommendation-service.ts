@@ -4,12 +4,20 @@
  */
 
 import type { ProjectSummary } from "@/lib/catalog/queries";
-import { computePopularityScores } from "@/lib/recommender/popularity";
-import { rankCandidates, resolveRankingWeights } from "@/lib/recommender/rank";
+import {
+  buildCollaborativeModel,
+  collaborativeSeedsForUser,
+  scoreCollaborativeCandidates,
+} from "@/lib/recommender/collaborative";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
 import { explainRecommendation, type Explanation } from "@/lib/recommender/explain";
+import { computePopularityScores } from "@/lib/recommender/popularity";
+import { rankCandidates, resolveRankingWeights } from "@/lib/recommender/rank";
 import {
+  describeSupportingSeeds,
   recommendForUser,
+  resolveAvailableComponents,
+  type CollaborativeItemDiagnostics,
   type RecommendationContext,
   type RecommenderDeps,
 } from "@/lib/recommender/recommend";
@@ -19,6 +27,7 @@ import { similarProjects } from "@/lib/recommender/similar";
 import type { CandidateSource, PipelineStats, RankingWeights, ScoreBreakdown } from "@/lib/recommender/types";
 import {
   loadCatalogItems,
+  loadCollaborativeInteractions,
   loadLabelResolver,
   loadPopularityEvidence,
   loadRecommendationProfile,
@@ -29,11 +38,14 @@ export interface RecommendationView {
   rank: number;
   /** Match score in [0, 1] — not a calibrated probability. */
   score: number;
+  /** Per-component signals; `null` = no evidence for this candidate. */
   breakdown: ScoreBreakdown;
   weights: Partial<RankingWeights>;
   sources: CandidateSource[];
   explanation: Explanation;
   saved: boolean;
+  /** Collaborative evidence behind this recommendation (null when none). */
+  collaborative: CollaborativeItemDiagnostics | null;
   project: ProjectSummary;
 }
 
@@ -60,13 +72,14 @@ export function toProjectSummary(item: CatalogItem): ProjectSummary {
   };
 }
 
-/** Personalised feed for a user (content + popularity in Phase 3). */
+/** Personalised feed for a user (content + collaborative + popularity). */
 export async function getRecommendationFeed(userId: string, options: { limit?: number; now?: Date } = {}): Promise<RecommendationFeed> {
   const catalog = await loadCatalogItems();
   const deps: RecommenderDeps = {
     loadProfile: loadRecommendationProfile,
     loadCatalog: async () => catalog,
     loadPopularityEvidence,
+    loadCollaborativeInteractions,
     loadLabelResolver,
   };
   const result = await recommendForUser(deps, { userId, limit: options.limit, now: options.now });
@@ -89,6 +102,7 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
           sources: item.sources,
           explanation: item.explanation,
           saved: item.saved,
+          collaborative: item.collaborative,
           project: toProjectSummary(project),
         },
       ];
@@ -116,7 +130,10 @@ export async function getSimilarProjects(projectId: string, limit?: number): Pro
 export interface ProjectRecommendationContext {
   score: number;
   breakdown: ScoreBreakdown;
+  weights: Partial<RankingWeights>;
+  sources: CandidateSource[];
   explanation: Explanation;
+  collaborative: CollaborativeItemDiagnostics | null;
   coldStart: boolean;
   excludedFromDiscovery: boolean;
 }
@@ -127,29 +144,46 @@ export interface ProjectRecommendationContext {
  * null when the user has no profile signal at all.
  */
 export async function getProjectRecommendationContext(userId: string, projectId: string, now: Date = new Date()): Promise<ProjectRecommendationContext | null> {
-  const [profile, catalog, popularityEvidence, labelFor] = await Promise.all([
+  const [profile, catalog, popularityEvidence, interactions, labelFor] = await Promise.all([
     loadRecommendationProfile(userId, now),
     loadCatalogItems(),
     loadPopularityEvidence(),
+    loadCollaborativeInteractions(),
     loadLabelResolver(),
   ]);
   const project = catalog.find((item) => item.id === projectId);
   if (!project) return null;
   const effective = blendProfiles(profile.longTerm, profile.session);
-  if (Object.keys(effective.vector).length === 0) return null;
+  const profileEmpty = Object.keys(effective.vector).length === 0;
+  if (profileEmpty) return null;
+  const projectById = new Map(catalog.map((item) => [item.id, item]));
 
   const coldStart = profile.longTerm.interactionCount < RECOMMENDER_CONFIG.coldStart.maxInteractions;
   const popularity = computePopularityScores(catalog, popularityEvidence).get(project.id);
   const contentAffinity = cosineSimilarity(effective.vector, project.vector);
-  const weights = resolveRankingWeights(["content", "popularity"], { coldStart });
+
+  // Collaborative evidence for this project from the same model the feed uses.
+  const model = buildCollaborativeModel(interactions, { excludeUserId: userId });
+  const seeds = collaborativeSeedsForUser(interactions, userId);
+  const scoring = scoreCollaborativeCandidates(model, seeds, { excludedProjectIds: profile.excludedProjectIds });
+  const evidence = scoring.scores.get(project.id) ?? null;
+  const collaborativeAvailable = seeds.length > 0 && scoring.scores.size > 0;
+  const seedViews = describeSupportingSeeds(scoring, project.id, projectById);
+
+  const sources: CandidateSource[] = evidence ? ["content", "collaborative"] : ["content"];
+  const weights = resolveRankingWeights(resolveAvailableComponents({ profileEmpty, collaborativeAvailable }), { coldStart });
   const [ranked] = rankCandidates(
     [
       {
         projectId: project.id,
         slug: project.slug,
         popularityPrior: project.popularity,
-        sources: ["content"],
-        signals: { content: contentAffinity, popularity: popularity?.score ?? 0 },
+        sources,
+        signals: {
+          content: contentAffinity,
+          ...(evidence ? { collaborative: evidence.score } : {}),
+          popularity: popularity?.score ?? 0,
+        },
         saved: profile.savedProjectIds.has(project.id),
       },
     ],
@@ -163,14 +197,20 @@ export async function getProjectRecommendationContext(userId: string, projectId:
     contentAffinity,
     sessionAffinity: profile.session.norm > 0 ? cosineSimilarity(profile.session.vector, project.vector) : null,
     popularityScore: popularity?.score ?? 0,
-    sources: ["content"],
+    sources,
     coldStart: profile.longTerm.interactionCount === 0,
     labelFor,
+    collaborativeScore: evidence?.score ?? null,
+    collaborativeSeeds: seedViews.map((s) => ({ projectId: s.projectId, title: s.title, state: s.state, contribution: s.contribution })),
+    weights,
   });
   return {
     score: ranked.score,
     breakdown: ranked.breakdown,
+    weights,
+    sources,
     explanation,
+    collaborative: evidence ? { score: evidence.score, rawEvidence: evidence.rawEvidence, confidence: scoring.confidence, seeds: seedViews } : null,
     coldStart,
     excludedFromDiscovery: profile.excludedProjectIds.has(project.id),
   };

@@ -1,19 +1,31 @@
 import type { Explanation } from "@/lib/recommender/explain";
+import type { CollaborativeItemDiagnostics } from "@/lib/recommender/recommend";
 import type { RankingWeights, ScoreBreakdown } from "@/lib/recommender/types";
 
 const FACTOR_LABELS: Record<Explanation["primary"], string> = {
   onboarding: "Onboarding interests",
   taste: "Long-term taste",
   session: "This session",
+  collaborative: "People who liked what you liked",
   fit: "Difficulty / duration / language fit",
   popularity: "Popularity",
   catalog: "Catalog",
 };
 
+const SEED_STATE_LABEL: Record<CollaborativeItemDiagnostics["seeds"][number]["state"], string> = {
+  completed: "completed",
+  built: "building",
+  saved: "saved",
+  shared: "shared",
+  opened: "opened",
+};
+
 /**
  * "Why this recommendation?" — the explanation factors plus the score
  * breakdown. Numbers are the normalised component signals and the weights
- * used; the final value is a match score, not a probability.
+ * used; "—" means the signal was unavailable for this project (no evidence),
+ * which is different from a score of 0. The final value is a match score, not
+ * a probability.
  */
 export function RecommendationExplanation({
   explanation,
@@ -21,6 +33,7 @@ export function RecommendationExplanation({
   weights,
   score,
   sources,
+  collaborative,
   id,
 }: {
   explanation: Explanation;
@@ -28,10 +41,12 @@ export function RecommendationExplanation({
   weights: Partial<RankingWeights>;
   score: number;
   sources: readonly string[];
+  collaborative?: CollaborativeItemDiagnostics | null;
   id?: string;
 }) {
-  const rows: { label: string; value: number; weight?: number }[] = [
+  const rows: { label: string; value: number | null; weight?: number }[] = [
     { label: "Content affinity", value: breakdown.content, weight: weights.content },
+    { label: "Collaborative signal", value: breakdown.collaborative, weight: weights.collaborative },
     { label: "Popularity", value: breakdown.popularity, weight: weights.popularity },
   ];
   return (
@@ -59,16 +74,33 @@ export function RecommendationExplanation({
         <dd className="border-t border-border pt-1 text-right font-medium">{score.toFixed(2)}</dd>
         <dd className="border-t border-border pt-1 text-right text-subtle">{sources.join(" + ")}</dd>
       </dl>
+      {collaborative && collaborative.seeds.length > 0 ? (
+        <div className="mt-3 text-xs" data-testid="collaborative-evidence">
+          <p className="text-subtle">
+            Behavioural neighbours of your own projects (confidence {collaborative.confidence.toFixed(2)}):
+          </p>
+          <ul className="mt-1 flex flex-col gap-0.5">
+            {collaborative.seeds.map((seed) => (
+              <li key={seed.projectId} className="flex items-baseline justify-between gap-3">
+                <span className="truncate">
+                  {seed.title} <span className="text-subtle">({SEED_STATE_LABEL[seed.state]})</span>
+                </span>
+                <span className="shrink-0 font-mono tabular-nums text-muted">sim {seed.similarity.toFixed(2)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function FragmentRow({ label, value, weight }: { label: string; value: number; weight?: number }) {
+function FragmentRow({ label, value, weight }: { label: string; value: number | null; weight?: number }) {
   return (
     <>
       <dt className="text-muted">{label}</dt>
-      <dd className="text-right">{value.toFixed(2)}</dd>
-      <dd className="text-right text-subtle">{weight !== undefined ? `× ${weight.toFixed(2)}` : "—"}</dd>
+      <dd className="text-right">{value === null ? "—" : value.toFixed(2)}</dd>
+      <dd className="text-right text-subtle">{weight !== undefined && value !== null ? `× ${weight.toFixed(2)}` : "—"}</dd>
     </>
   );
 }

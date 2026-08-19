@@ -13,12 +13,21 @@ import type { Difficulty, InteractionType } from "@/generated/prisma/enums";
 export const CANDIDATE_SOURCES = ["content", "collaborative", "popular", "exploration"] as const;
 export type CandidateSource = (typeof CANDIDATE_SOURCES)[number];
 
-/** Score components combined by the ranker. Every component is normalised to [0, 1]. */
+/**
+ * Score components combined by the ranker. `content` is a signed cosine in
+ * [-1, 1]; every other component is normalised to [0, 1].
+ */
 export const SCORE_COMPONENTS = ["content", "collaborative", "session", "novelty", "popularity"] as const;
 export type ScoreComponent = (typeof SCORE_COMPONENTS)[number];
 
 export type RankingWeights = Record<ScoreComponent, number>;
-export type ScoreBreakdown = Record<ScoreComponent, number>;
+
+/**
+ * Per-component signals of a ranked candidate. `null` means the signal was
+ * unavailable for this candidate (e.g. no collaborative evidence), which is
+ * deliberately distinct from a real score of 0.
+ */
+export type ScoreBreakdown = Record<ScoreComponent, number | null>;
 
 /**
  * Sparse feature vector. Keys are namespaced feature ids such as
@@ -52,6 +61,14 @@ export interface InteractionEvent {
   sessionId: string;
   type: InteractionType;
   weight: number;
+  createdAt: Date;
+}
+
+/** Interaction row needed by collaborative filtering (all users, no impressions required). */
+export interface CollaborativeInteraction {
+  userId: string;
+  projectId: string;
+  type: InteractionType;
   createdAt: Date;
 }
 

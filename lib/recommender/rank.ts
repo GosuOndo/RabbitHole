@@ -5,16 +5,20 @@
  *   score *= savedProjectScoreMultiplier                    when the project is already saved
  *
  * Weights come from RECOMMENDER_CONFIG.rankingWeights restricted to the
- * components that actually exist for this pipeline (Phase 3: content and
- * popularity; collaborative/session/novelty are added by later phases) and
- * renormalised to sum to 1. For cold-start users the popularity weight is
- * boosted before renormalisation so a thin profile does not over-fit.
+ * components that actually exist for this user/pipeline (content and popularity
+ * always; collaborative when the user has behavioural seeds; session/novelty
+ * are added by later phases) and renormalised to sum to 1. For cold-start
+ * users the popularity weight is boosted before renormalisation so a thin
+ * profile does not over-fit.
  *
  * Signals: `content` is a signed cosine affinity in [-1, 1] (a negative value
  * — the profile dislikes the project's features — legitimately lowers the
- * score); every other component is in [0, 1]. Missing signals are neutral (0),
- * never NaN. Ordering is deterministic: score desc, catalog popularity prior
- * desc, slug asc.
+ * score); every other component is in [0, 1]. A signal that is *absent* for a
+ * candidate (e.g. no collaborative evidence) contributes 0 to the weighted sum
+ * and is reported as `null` in the breakdown, so "no evidence" stays
+ * distinguishable from "evidence of zero"; non-finite inputs are neutralised
+ * to 0. Ordering is deterministic: score desc, catalog popularity prior desc,
+ * slug asc.
  *
  * The score is a *match score*, not a calibrated probability.
  */
@@ -28,8 +32,8 @@ export interface RankingInput {
   /** Catalog popularity prior, used only for tie-breaking. */
   popularityPrior: number;
   sources: CandidateSource[];
-  /** Normalised signals present for this candidate (missing = 0). */
-  signals: Partial<ScoreBreakdown>;
+  /** Normalised signals present for this candidate (absent = no evidence → null in the breakdown). */
+  signals: Partial<Record<ScoreComponent, number>>;
   saved?: boolean;
   /** Raw retrieval signals kept for diagnostics. */
   rawSignals?: Record<string, number>;
@@ -74,8 +78,9 @@ export function resolveRankingWeights(components: readonly ScoreComponent[], opt
   return resolved;
 }
 
-function clampSignal(component: ScoreComponent, value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return 0;
+/** Clamps a present signal into its valid range; non-finite values are neutralised to 0. */
+function clampSignal(component: ScoreComponent, value: number): number {
+  if (!Number.isFinite(value)) return 0;
   const min = component === "content" ? -1 : 0;
   return Math.max(min, Math.min(1, value));
 }
@@ -89,10 +94,11 @@ export function rankCandidates(
     const breakdown = {} as ScoreBreakdown;
     let score = 0;
     for (const component of SCORE_COMPONENTS) {
-      const signal = clampSignal(component, input.signals[component]);
+      const raw = input.signals[component];
+      const signal = raw === undefined ? null : clampSignal(component, raw);
       breakdown[component] = signal;
       const weight = options.weights[component];
-      if (weight !== undefined && weight > 0) score += weight * signal;
+      if (signal !== null && weight !== undefined && weight > 0) score += weight * signal;
     }
     score = Math.max(0, Math.min(1, score));
     const saved = input.saved ?? false;

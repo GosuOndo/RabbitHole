@@ -12,18 +12,25 @@
  *   - "Fits your preference for weekend-sized          positive difficulty / duration /
  *      advanced Rust projects."                          language features in the profile
  *   - "Popular with RabbitHole users…"                 popularity score above threshold
- * No collaborative claims are made (there is no collaborative signal yet).
- * Templates are chosen by a fixed precedence, so the same inputs always yield
- * the same text. Factors are returned as data for the inspector UI.
+ *   - "People who liked “X”, which you saved, also     item-item collaborative evidence:
+ *      liked this."                                     the candidate is a behavioural
+ *                                                        neighbour of the user's own
+ *                                                        positive-state projects (seeds)
+ * Collaborative wording is only produced when real seeds support the candidate;
+ * it becomes the primary sentence when its weighted contribution exceeds the
+ * content contribution, otherwise it is a secondary sentence. Templates are
+ * chosen by a fixed precedence, so the same inputs always yield the same text.
+ * Factors are returned as data for the inspector UI.
  */
 
 import type { Difficulty, DurationPreference } from "@/generated/prisma/enums";
+import type { CollaborativeSeedState } from "./collaborative";
 import { RECOMMENDER_CONFIG } from "./config";
 import { durationBucketForHours, featureId, type FeatureFamily } from "./features";
 import type { InterestProfile } from "./profile";
-import type { CandidateSource } from "./types";
+import type { CandidateSource, RankingWeights } from "./types";
 
-export type ExplanationFactorKind = "onboarding" | "taste" | "session" | "fit" | "popularity" | "catalog";
+export type ExplanationFactorKind = "onboarding" | "taste" | "session" | "collaborative" | "fit" | "popularity" | "catalog";
 
 export interface ExplanationFeature {
   id: string;
@@ -56,6 +63,38 @@ export interface ExplanationInput {
   /** True when the profile is onboarding-only (no weighted interactions yet). */
   coldStart: boolean;
   labelFor: (family: FeatureFamily, key: string) => string;
+  /** Normalised collaborative score, or null when the candidate has no collaborative evidence. */
+  collaborativeScore?: number | null;
+  /** The user's own positive-state projects that support the collaborative score, strongest first. */
+  collaborativeSeeds?: readonly CollaborativeSeedReference[];
+  /** Ranking weights in force (decides whether collaborative or content wording leads). */
+  weights?: Partial<RankingWeights>;
+}
+
+export interface CollaborativeSeedReference {
+  projectId: string;
+  title: string;
+  state: CollaborativeSeedState;
+  contribution: number;
+}
+
+const SEED_VERB: Record<CollaborativeSeedState, string> = {
+  completed: "completed",
+  built: "are building",
+  saved: "saved",
+  shared: "shared",
+  opened: "opened",
+};
+
+/** "People who liked “X”, which you saved, also liked this." — names real seed projects. */
+export function collaborativeSentence(seeds: readonly CollaborativeSeedReference[]): string {
+  const [first, second] = seeds;
+  if (!first) return "";
+  if (!second) return `People who liked “${first.title}”, which you ${SEED_VERB[first.state]}, also liked this.`;
+  if (first.state === second.state) {
+    return `People who liked “${first.title}” and “${second.title}”, which you ${SEED_VERB[first.state]}, also liked this.`;
+  }
+  return `People who liked “${first.title}” (which you ${SEED_VERB[first.state]}) and “${second.title}” (which you ${SEED_VERB[second.state]}) also liked this.`;
 }
 
 const DURATION_PROSE: Record<Exclude<DurationPreference, "ANYTHING">, string> = {
@@ -149,14 +188,36 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
   const popularitySupported = input.popularityScore >= config.minPopularity && input.sources.includes("popular");
   if (popularitySupported) factors.push({ kind: "popularity", features: [], strength: input.popularityScore });
 
-  // Fixed precedence: taste/onboarding → session → fit → popularity → catalog.
+  // Collaborative: only with real seeds behind a meaningful normalised score.
+  const seeds = (input.collaborativeSeeds ?? []).slice(0, config.maxFeaturesPerSentence);
+  const collaborativeScore = input.collaborativeScore ?? null;
+  const collaborativeSupported =
+    collaborativeScore !== null && collaborativeScore >= config.minCollaborative && seeds.length > 0 && input.sources.includes("collaborative");
+  if (collaborativeSupported) {
+    factors.push({
+      kind: "collaborative",
+      features: seeds.map((s) => ({ id: `project:${s.projectId}`, label: s.title })),
+      strength: collaborativeScore,
+    });
+  }
+  const contentContribution = (input.weights?.content ?? 0) * Math.max(0, input.contentAffinity);
+  const collaborativeContribution = collaborativeSupported ? (input.weights?.collaborative ?? 0) * collaborativeScore : 0;
+  const collaborativeLeads = collaborativeSupported && (!tasteSupported || collaborativeContribution > contentContribution);
+
+  // Fixed precedence: collaborative (when it dominates) → taste/onboarding → session → fit → popularity → catalog.
   const tagProse = joinNatural(tasteFeatures.map((f) => proseLabel(f.label)));
   const sessionProse = joinNatural(sessionTags.map((t) => proseLabel(labelFor("tag", t.slug))));
   const fitSentence = `Fits your preference for ${fitParts.join(" ")} projects.`;
+  const collaborativeText = collaborativeSupported ? collaborativeSentence(seeds) : "";
 
   let text: string;
   let primary: ExplanationFactorKind;
-  if (tasteSupported && input.coldStart) {
+  if (collaborativeLeads) {
+    primary = "collaborative";
+    text = collaborativeText;
+    if (tasteSupported) text += ` It also matches your interest in ${tagProse}.`;
+    else if (fitSupported) text += ` ${fitSentence}`;
+  } else if (tasteSupported && input.coldStart) {
     primary = "onboarding";
     text = `Based on the interests you selected during onboarding: ${tagProse}.`;
     if (fitSupported) text += ` ${fitSentence}`;
@@ -164,6 +225,7 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
     primary = "taste";
     text = `Because you like ${tagProse} projects.`;
     if (sessionSupported) text += ` You've also been exploring ${sessionProse} this session.`;
+    else if (collaborativeSupported) text += ` ${collaborativeText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
   } else if (sessionSupported) {
     primary = "session";

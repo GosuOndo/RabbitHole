@@ -10,7 +10,7 @@ import { POSITIVE_INTERACTION_TYPES } from "@/lib/recommender/config";
 import { projectFeatureVector } from "@/lib/recommender/features";
 import { positiveEvidenceFromCounts } from "@/lib/recommender/popularity";
 import type { LabelResolver, RecommendationProfileInput, RecommenderDeps } from "@/lib/recommender/recommend";
-import type { ProjectVector } from "@/lib/recommender/types";
+import type { CollaborativeInteraction, ProjectVector } from "@/lib/recommender/types";
 
 /** A catalog project with card data *and* its recommender feature vector. */
 export interface CatalogItem extends ProjectSummary, ProjectVector {}
@@ -53,6 +53,19 @@ export async function loadPopularityEvidence(): Promise<Map<string, number>> {
   return positiveEvidenceFromCounts(rows.map((row) => ({ projectId: row.projectId, type: row.type, count: row._count._all })));
 }
 
+/**
+ * Every non-impression interaction across all users, oldest first — the input
+ * for item-item collaborative filtering (≈ a few thousand rows, one query).
+ * Impressions are excluded because they carry no positive collaborative evidence.
+ */
+export async function loadCollaborativeInteractions(): Promise<CollaborativeInteraction[]> {
+  return prisma.interaction.findMany({
+    where: { type: { not: "IMPRESSION" } },
+    select: { userId: true, projectId: true, type: true, createdAt: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+}
+
 export async function loadLabelResolver(): Promise<LabelResolver> {
   const labels = await loadLabelMaps();
   return (family, key) => labelForFeature(family, key, labels);
@@ -75,5 +88,6 @@ export const prismaRecommenderDeps: RecommenderDeps = {
   loadProfile: loadRecommendationProfile,
   loadCatalog: loadCatalogItems,
   loadPopularityEvidence,
+  loadCollaborativeInteractions,
   loadLabelResolver,
 };

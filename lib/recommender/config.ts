@@ -131,6 +131,26 @@ export const RECOMMENDER_CONFIG = {
     popularityWeightMultiplier: 3,
   },
 
+  /**
+   * Item-item collaborative filtering.
+   *
+   *   signal(user, project)  = current-state positive evidence (see collaborative.ts)
+   *   sim(i, j)              = cosine(v_i, v_j) × overlap / (overlap + shrinkage)
+   *   evidence(candidate)    = Σ_seeds sim(seed, candidate) × seedWeight
+   *   score(candidate)       = evidence / max evidence × confidence,
+   *   confidence             = min(1, Σ seedWeight / fullConfidenceSeedWeight)
+   */
+  collaborative: {
+    /** Dampens similarities backed by only a handful of overlapping users. */
+    shrinkage: 2,
+    /** Neighbours kept per item after similarity computation. */
+    neighboursPerItem: 20,
+    /** Σ seed weights at which a user's collaborative evidence is fully trusted (≈ one BUILD + one SAVE). */
+    fullConfidenceSeedWeight: 6,
+    /** Candidates below this normalised score are dropped from collaborative retrieval. */
+    minCandidateScore: 0.02,
+  },
+
   /** Deterministic explanation thresholds. */
   explanation: {
     /** Content affinity needed before "because you like…" is claimed. */
@@ -139,6 +159,8 @@ export const RECOMMENDER_CONFIG = {
     minSessionAffinity: 0.25,
     /** Popularity score needed before "popular with RabbitHole users" is claimed. */
     minPopularity: 0.5,
+    /** Collaborative score needed before "people who liked … also liked this" is claimed. */
+    minCollaborative: 0.3,
     maxFeaturesPerSentence: 2,
   },
 

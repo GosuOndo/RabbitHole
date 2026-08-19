@@ -95,6 +95,7 @@ export function RecommendationCard({
           weights={item.weights}
           score={item.score}
           sources={item.sources}
+          collaborative={item.collaborative}
         />
       ) : null}
 

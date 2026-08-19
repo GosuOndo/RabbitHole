@@ -7,6 +7,8 @@
  *   disliked  — the latest SAVE/DISLIKE event is DISLIKE (a later SAVE lifts it)
  *   built     — any BUILD event
  *   completed — any COMPLETE event
+ *   opened    — any OPEN event
+ *   shared    — any SHARE event
  *   excluded  — any of RECOMMENDER_CONFIG.filtering.excludedInteractionTypes
  */
 
@@ -25,6 +27,10 @@ export interface ProjectState {
   disliked: boolean;
   built: boolean;
   completed: boolean;
+  /** Any OPEN event (weak engagement). */
+  opened: boolean;
+  /** Any SHARE event. */
+  shared: boolean;
   /** Time of the SAVE that made the project saved (null when not saved). */
   savedAt: Date | null;
   /** True when a terminal interaction (DISLIKE/BUILD/COMPLETE by config) exists. */
@@ -49,6 +55,8 @@ export function deriveProjectStates(interactions: readonly StateInteraction[]): 
         disliked: false,
         built: false,
         completed: false,
+        opened: false,
+        shared: false,
         savedAt: null,
         excludedFromDiscovery: false,
         interactionCount: 0,
@@ -77,9 +85,13 @@ export function deriveProjectStates(interactions: readonly StateInteraction[]): 
       case "COMPLETE":
         state.completed = true;
         break;
-      case "IMPRESSION":
       case "OPEN":
+        state.opened = true;
+        break;
       case "SHARE":
+        state.shared = true;
+        break;
+      case "IMPRESSION":
         break;
     }
     if (excludedTypes.has(interaction.type)) state.excludedFromDiscovery = true;

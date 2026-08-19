@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
 import { buildSessionProfile, EMPTY_PROFILE } from "@/lib/recommender/profile";
 import { recommendForUser, runRecommendationPipeline, type RecommenderDeps } from "@/lib/recommender/recommend";
+import type { CollaborativeInteraction } from "@/lib/recommender/types";
 import {
   NOW,
   behaviourProfile,
@@ -12,12 +13,13 @@ import {
   profileInput,
   projectBySlug,
 } from "../helpers/catalog-fixture";
+import { clusterInteractions, ev } from "../helpers/collaborative-fixture";
 
 const catalog = catalogFixture();
 const noEvidence = new Map<string, number>();
 
-function run(profile: ReturnType<typeof profileInput>, limit = 10, evidence = noEvidence) {
-  return runRecommendationPipeline({ profile, catalog, popularityEvidence: evidence, labelFor: fixtureLabelFor, limit });
+function run(profile: ReturnType<typeof profileInput>, limit = 10, evidence = noEvidence, interactions: CollaborativeInteraction[] = []) {
+  return runRecommendationPipeline({ userId: "target", profile, catalog, popularityEvidence: evidence, interactions, labelFor: fixtureLabelFor, limit });
 }
 
 describe("runRecommendationPipeline", () => {
@@ -30,7 +32,7 @@ describe("runRecommendationPipeline", () => {
       expect(Number.isFinite(item.score)).toBe(true);
       expect(item.score).toBeGreaterThanOrEqual(0);
       expect(item.score).toBeLessThanOrEqual(1);
-      for (const value of Object.values(item.breakdown)) expect(Number.isFinite(value)).toBe(true);
+      for (const value of Object.values(item.breakdown)) expect(value === null || Number.isFinite(value)).toBe(true);
       expect(item.explanation.text.length).toBeGreaterThan(0);
       expect(item.sources.length).toBeGreaterThan(0);
     });
@@ -132,12 +134,152 @@ describe("runRecommendationPipeline", () => {
   });
 });
 
+describe("hybrid pipeline with collaborative filtering", () => {
+  const rows = clusterInteractions();
+  const systemsHistory = [
+    ...rows,
+    ev("target", "build-your-own-redis", "SAVE"),
+    ev("target", "write-an-http-server", "BUILD"),
+    ev("target", "implement-a-tiny-database", "OPEN"),
+  ];
+
+  it("adds collaborative candidates and uses the hybrid weights when the user has behavioural seeds", () => {
+    const longTerm = behaviourProfile(
+      interactionsOn([
+        { slug: "build-your-own-redis", type: "SAVE" },
+        { slug: "write-an-http-server", type: "BUILD" },
+        { slug: "implement-a-tiny-database", type: "OPEN" },
+      ]),
+    );
+    expect(longTerm.interactionCount).toBeGreaterThanOrEqual(RECOMMENDER_CONFIG.coldStart.maxInteractions);
+    const output = run(profileInput(longTerm, { excludedProjectIds: new Set(["write-an-http-server"]) }), 10, noEvidence, systemsHistory);
+    expect(output.pipeline.collaborativeCandidates).toBeGreaterThan(0);
+    expect(output.context.collaborative.available).toBe(true);
+    expect(output.context.collaborative.seedCount).toBe(3);
+    expect(output.context.coldStart).toBe(false);
+    expect(output.context.components).toEqual(["content", "collaborative", "popularity"]);
+    const [first] = output.items;
+    expect(first!.weights.content).toBeCloseTo(0.5625, 4);
+    expect(first!.weights.collaborative).toBeCloseTo(0.3125, 4);
+    expect(first!.weights.popularity).toBeCloseTo(0.125, 4);
+    // A cold-start user with seeds keeps the popularity boost but still gets the collaborative component.
+    const cold = run(profileInput(behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }]))), 10, noEvidence, systemsHistory);
+    expect(cold.context.coldStart).toBe(true);
+    expect(cold.context.components).toEqual(["content", "collaborative", "popularity"]);
+    expect(cold.items[0]!.weights.popularity).toBeCloseTo(0.3, 4);
+    expect(cold.items[0]!.weights.content).toBeCloseTo(0.45, 4);
+    expect(cold.items[0]!.weights.collaborative).toBeCloseTo(0.25, 4);
+    const collaborativeItems = output.items.filter((i) => i.sources.includes("collaborative"));
+    expect(collaborativeItems.length).toBeGreaterThan(0);
+    for (const item of collaborativeItems) {
+      expect(item.breakdown.collaborative).not.toBeNull();
+      expect(item.breakdown.collaborative!).toBeGreaterThan(0);
+      expect(item.collaborative?.seeds.length).toBeGreaterThan(0);
+      expect(item.collaborative!.seeds.every((s) => ["build-your-own-redis", "write-an-http-server", "implement-a-tiny-database"].includes(s.projectId))).toBe(true);
+    }
+    const contentOnly = output.items.find((i) => !i.sources.includes("collaborative"));
+    if (contentOnly) {
+      expect(contentOnly.breakdown.collaborative).toBeNull();
+      expect(contentOnly.collaborative).toBeNull();
+    }
+    // The behavioural neighbour of the seeds is a top result and never a seed itself.
+    expect(output.items.slice(0, 3).map((i) => i.projectId)).toContain("implement-a-dns-resolver");
+    expect(output.items.some((i) => i.projectId === "write-an-http-server")).toBe(false);
+  });
+
+  it("with no behavioural history the collaborative component is absent (not fabricated)", () => {
+    const output = run(profileInput(onboardingProfile(["systems", "databases"])), 10, noEvidence, rows);
+    expect(output.pipeline.collaborativeCandidates).toBe(0);
+    expect(output.context.collaborative).toMatchObject({ available: false, seedCount: 0, confidence: 0 });
+    expect(output.context.components).toEqual(["content", "popularity"]);
+    for (const item of output.items) {
+      expect(item.breakdown.collaborative).toBeNull();
+      expect(item.sources).not.toContain("collaborative");
+      expect(item.explanation.text).not.toMatch(/People who liked/);
+    }
+  });
+
+  it("impressions alone create no collaborative evidence", () => {
+    const impressions = [...rows, ev("target", "build-your-own-redis", "IMPRESSION"), ev("target", "write-an-http-server", "IMPRESSION")];
+    const output = run(profileInput(onboardingProfile(["systems"])), 10, noEvidence, impressions);
+    expect(output.pipeline.collaborativeCandidates).toBe(0);
+    expect(output.context.collaborative.available).toBe(false);
+  });
+
+  it("collaborative history changes the ranking even when content preferences are identical", () => {
+    const sharedProfile = profileInput(onboardingProfile(["systems", "graphics"]));
+    const systemsUser = [...rows, ev("target", "build-your-own-redis", "SAVE"), ev("target", "write-an-http-server", "BUILD")];
+    const graphicsUser = [...rows, ev("target", "implement-a-ray-tracer", "SAVE"), ev("target", "live-shader-playground", "BUILD")];
+    const a = run(sharedProfile, 10, noEvidence, systemsUser);
+    const b = run(sharedProfile, 10, noEvidence, graphicsUser);
+    expect(a.items.map((i) => i.projectId)).not.toEqual(b.items.map((i) => i.projectId));
+    const rankOf = (items: typeof a.items, id: string) => items.findIndex((i) => i.projectId === id);
+    // dns is a systems-cluster neighbour; fluid simulation a graphics-cluster neighbour.
+    expect(rankOf(a.items, "implement-a-dns-resolver")).toBeGreaterThanOrEqual(0);
+    expect(rankOf(b.items, "webgl-fluid-simulation")).toBeGreaterThanOrEqual(0);
+    const dnsInA = rankOf(a.items, "implement-a-dns-resolver");
+    const dnsInB = rankOf(b.items, "implement-a-dns-resolver");
+    expect(dnsInB === -1 || dnsInA < dnsInB).toBe(true);
+    const fluidInB = rankOf(b.items, "webgl-fluid-simulation");
+    const fluidInA = rankOf(a.items, "webgl-fluid-simulation");
+    expect(fluidInA === -1 || fluidInB < fluidInA).toBe(true);
+    expect(a.items.find((i) => i.projectId === "implement-a-dns-resolver")!.breakdown.collaborative).toBeGreaterThan(0);
+    expect(b.items.find((i) => i.projectId === "webgl-fluid-simulation")!.breakdown.collaborative).toBeGreaterThan(0);
+  });
+
+  it("collaborative candidates never bypass terminal-state exclusions", () => {
+    const longTerm = behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }]));
+    const excluded = new Set(["implement-a-dns-resolver", "implement-a-tiny-database"]);
+    const output = run(profileInput(longTerm, { excludedProjectIds: excluded }), 30, noEvidence, systemsHistory);
+    for (const id of excluded) expect(output.items.some((i) => i.projectId === id)).toBe(false);
+    expect(output.pipeline.afterFiltering).toBe(output.pipeline.uniqueCandidates);
+  });
+
+  it("a project with no collaborative history is still recommendable through content", () => {
+    // implement-raft-consensus never appears in the behavioural fixture.
+    const longTerm = behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }, { slug: "write-an-http-server", type: "BUILD" }]));
+    const output = run(profileInput(onboardingProfile(["distributed", "systems"], { chosen: ["implement-raft-consensus"] })), 30, noEvidence, systemsHistory);
+    void longTerm;
+    const raft = output.items.find((i) => i.projectId === "implement-raft-consensus");
+    expect(raft).toBeDefined();
+    expect(raft!.sources).toContain("content");
+    expect(raft!.sources).not.toContain("collaborative");
+    expect(raft!.breakdown.collaborative).toBeNull();
+    expect(raft!.breakdown.content).toBeGreaterThan(0);
+  });
+
+  it("explains collaborative recommendations by naming real seed projects, and only those", () => {
+    const longTerm = behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }, { slug: "write-an-http-server", type: "BUILD" }]));
+    const output = run(profileInput(longTerm), 10, noEvidence, systemsHistory);
+    const collaborative = output.items.filter((i) => i.explanation.factors.some((f) => f.kind === "collaborative"));
+    expect(collaborative.length).toBeGreaterThan(0);
+    for (const item of collaborative) {
+      expect(item.sources).toContain("collaborative");
+      expect(item.breakdown.collaborative!).toBeGreaterThanOrEqual(RECOMMENDER_CONFIG.explanation.minCollaborative);
+      expect(item.explanation.text).toMatch(/People who liked “/);
+      const named = item.explanation.factors.find((f) => f.kind === "collaborative")!.features.map((f) => f.label);
+      for (const title of named) expect(["Build your own Redis", "Write an HTTP/1.1 server from raw sockets", "Implement a tiny database"]).toContain(title);
+    }
+    for (const item of output.items.filter((i) => !i.sources.includes("collaborative"))) {
+      expect(item.explanation.text).not.toMatch(/People who liked/);
+    }
+  });
+
+  it("is deterministic with the collaborative component", () => {
+    const longTerm = behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }]));
+    const a = run(profileInput(longTerm), 10, noEvidence, systemsHistory);
+    const b = run(profileInput(longTerm), 10, noEvidence, systemsHistory);
+    expect(a.items.map((i) => [i.projectId, i.score, i.breakdown.collaborative])).toEqual(b.items.map((i) => [i.projectId, i.score, i.breakdown.collaborative]));
+  });
+});
+
 describe("recommendForUser", () => {
   it("loads through injected dependencies and clamps the limit to the configured bounds", async () => {
     const deps: RecommenderDeps = {
       loadProfile: async () => profileInput(onboardingProfile(["security", "networking"])),
       loadCatalog: async () => catalog,
       loadPopularityEvidence: async () => new Map(),
+      loadCollaborativeInteractions: async () => [],
       loadLabelResolver: async () => fixtureLabelFor,
     };
     const result = await recommendForUser(deps, { userId: "u", limit: 999, now: NOW });

@@ -13,7 +13,6 @@ import { getOrCreateDemoUser } from "@/lib/demo-user";
 import { formatScore, splitParagraphs } from "@/lib/format";
 import { getProjectStateForUser } from "@/lib/profile/profile-service";
 import { getProjectRecommendationContext, getSimilarProjects } from "@/lib/recommendations/recommendation-service";
-import { resolveRankingWeights } from "@/lib/recommender/rank";
 
 export const dynamic = "force-dynamic";
 
@@ -94,9 +93,10 @@ export default async function ProjectPage({ params, searchParams }: { params: Pr
                 <RecommendationExplanation
                   explanation={recommendation.explanation}
                   breakdown={recommendation.breakdown}
-                  weights={resolveRankingWeights(["content", "popularity"], { coldStart: recommendation.coldStart })}
+                  weights={recommendation.weights}
                   score={recommendation.score}
-                  sources={["content"]}
+                  sources={recommendation.sources}
+                  collaborative={recommendation.collaborative}
                 />
               </div>
             </details>

@@ -91,6 +91,57 @@ describe("explainRecommendation", () => {
     expect(result.text).toBe("From the RabbitHole catalog.");
   });
 
+  describe("collaborative wording", () => {
+    const seeds = [
+      { projectId: "build-your-own-redis", title: "Build your own Redis", state: "saved" as const, contribution: 1.4 },
+      { projectId: "write-an-http-server", title: "Write an HTTP/1.1 server from raw sockets", state: "built" as const, contribution: 0.9 },
+    ];
+    const hybridWeights = { content: 0.5625, collaborative: 0.3125, popularity: 0.125 };
+
+    it("names real seed projects and leads when collaborative evidence dominates", () => {
+      const result = explainRecommendation(
+        baseInput({ contentAffinity: 0.15, collaborativeScore: 0.9, collaborativeSeeds: seeds, weights: hybridWeights, sources: ["content", "collaborative"] }),
+      );
+      expect(result.primary).toBe("collaborative");
+      expect(result.text).toBe(
+        "People who liked “Build your own Redis” (which you saved) and “Write an HTTP/1.1 server from raw sockets” (which you are building) also liked this.",
+      );
+      const factor = result.factors.find((f) => f.kind === "collaborative")!;
+      expect(factor.features.map((f) => f.label)).toEqual(["Build your own Redis", "Write an HTTP/1.1 server from raw sockets"]);
+      expect(factor.strength).toBe(0.9);
+    });
+
+    it("stays secondary when content dominates, and shares the verb when both seeds share a state", () => {
+      const sameState = [seeds[0]!, { ...seeds[1]!, state: "saved" as const }];
+      const result = explainRecommendation(
+        baseInput({ contentAffinity: 0.8, collaborativeScore: 0.5, collaborativeSeeds: sameState, weights: hybridWeights, sources: ["content", "collaborative"] }),
+      );
+      expect(result.primary).toBe("taste");
+      expect(result.text).toMatch(/^Because you like .* projects\. People who liked “Build your own Redis” and “Write an HTTP\/1\.1 server from raw sockets”, which you saved, also liked this\.$/);
+    });
+
+    it("never claims collaborative evidence for popularity-only, content-only or onboarding-only recommendations", () => {
+      const popularityOnly = explainRecommendation(baseInput({ project: projectBySlug("habit-tracker-mobile-app"), contentAffinity: 0.05, sources: ["popular"], collaborativeScore: null, collaborativeSeeds: [] }));
+      expect(popularityOnly.text).not.toMatch(/People who liked/);
+      const contentOnly = explainRecommendation(baseInput({ sources: ["content"], collaborativeScore: null, collaborativeSeeds: [], weights: hybridWeights }));
+      expect(contentOnly.text).not.toMatch(/People who liked/);
+      expect(contentOnly.factors.some((f) => f.kind === "collaborative")).toBe(false);
+      const coldStart = explainRecommendation(baseInput({ coldStart: true, sources: ["content"], collaborativeScore: null, collaborativeSeeds: [] }));
+      expect(coldStart.primary).toBe("onboarding");
+      expect(coldStart.text).not.toMatch(/People who liked/);
+      // A collaborative score without seeds, or below the threshold, is not enough to make the claim.
+      const noSeeds = explainRecommendation(baseInput({ collaborativeScore: 0.9, collaborativeSeeds: [], sources: ["content", "collaborative"], weights: hybridWeights }));
+      expect(noSeeds.text).not.toMatch(/People who liked/);
+      const weak = explainRecommendation(baseInput({ collaborativeScore: 0.1, collaborativeSeeds: seeds, sources: ["content", "collaborative"], weights: hybridWeights }));
+      expect(weak.text).not.toMatch(/People who liked/);
+    });
+
+    it("is deterministic", () => {
+      const input = baseInput({ contentAffinity: 0.2, collaborativeScore: 0.8, collaborativeSeeds: seeds, weights: hybridWeights, sources: ["collaborative"] });
+      expect(explainRecommendation(input)).toEqual(explainRecommendation(input));
+    });
+  });
+
   it("is deterministic and lowercases prose labels sensibly", () => {
     const a = explainRecommendation(baseInput({}));
     const b = explainRecommendation(baseInput({}));

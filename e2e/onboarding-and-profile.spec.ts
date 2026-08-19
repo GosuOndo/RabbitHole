@@ -22,7 +22,7 @@ async function fetchProfile(request: APIRequestContext): Promise<ProfileResponse
 }
 
 test.describe("onboarding", () => {
-  test("a fresh demo user is sent to onboarding and can complete every step", async ({ page }) => {
+  test("a fresh demo user is sent to onboarding and can complete every step", async ({ page, request }) => {
     await page.goto("/");
     await expect(page).toHaveURL(/\/onboarding$/);
     await expect(page.getByRole("heading", { level: 2, name: "What sounds interesting?" })).toBeVisible();
@@ -67,6 +67,17 @@ test.describe("onboarding", () => {
     expect(await cards.count()).toBeGreaterThanOrEqual(5);
     await expect(page.getByTestId("feed-context")).toContainText("Still learning your taste");
     await expect(cards.first().getByTestId("recommendation-reason")).toContainText("Based on the interests you selected during onboarding");
+
+    // The feed just recorded impressions; they must not become collaborative evidence.
+    const feed = await (await request.get("/api/recommendations?limit=10")).json();
+    expect(feed.context.collaborative.available).toBe(false);
+    expect(feed.context.collaborative.seedCount).toBe(0);
+    expect(feed.pipeline.collaborativeCandidates).toBe(0);
+    for (const item of feed.items) {
+      expect(item.breakdown.collaborative).toBeNull();
+      expect(item.sources).not.toContain("collaborative");
+      expect(item.explanation.text).not.toMatch(/People who liked/);
+    }
   });
 
   test("onboarding persists after reload and seeds the long-term profile", async ({ page, request }) => {
