@@ -104,3 +104,48 @@ describe("sessionService.touch", () => {
     expect(repository.get(session.id)?.lastActiveAt).toEqual(minutes(10));
   });
 });
+
+describe("manual new session vs automatic expiry (Phase 6)", () => {
+  it("manual new session: new session for the same user, old one becomes historical, next activity resolves to the new one", async () => {
+    const { service, repository } = setup();
+    const first = (await service.resolveActive("user-a", T0)).session;
+    await service.touch(first.id, minutes(5));
+    const fresh = await service.startNew("user-a", minutes(6));
+    expect(fresh.userId).toBe("user-a");
+    expect(fresh.id).not.toBe(first.id);
+    expect(fresh.startedAt).toEqual(minutes(6));
+    expect(fresh.endedAt).toBeNull();
+    // The previous session is closed but kept (history is never deleted).
+    expect(repository.get(first.id)).toBeDefined();
+    expect(repository.get(first.id)?.endedAt).toEqual(minutes(6));
+    expect(repository.sessions.filter((s) => s.userId === "user-a")).toHaveLength(2);
+    // Subsequent activity belongs to the new session, not the old one.
+    const resolved = await service.resolveActive("user-a", minutes(7));
+    expect(resolved.created).toBe(false);
+    expect(resolved.session.id).toBe(fresh.id);
+    // Another user's session is untouched.
+    const other = (await service.resolveActive("user-b", T0)).session;
+    await service.startNew("user-a", minutes(8));
+    expect(repository.get(other.id)?.endedAt).toBeNull();
+  });
+
+  it("automatic expiry: within the threshold the same session, beyond it a new one; a recently created manual session keeps being used", async () => {
+    const { service } = setup(30);
+    const first = (await service.resolveActive("user-a", T0)).session;
+    expect((await service.resolveActive("user-a", minutes(29))).session.id).toBe(first.id);
+    expect((await service.resolveActive("user-a", minutes(30))).session.id).toBe(first.id);
+    await service.touch(first.id, minutes(30));
+    // 31 minutes after the last activity → expired → new session.
+    const later = await service.resolveActive("user-a", minutes(61));
+    expect(later.created).toBe(true);
+    expect(later.session.id).not.toBe(first.id);
+    expect(await service.getActive("user-a", minutes(61))).toMatchObject({ id: later.session.id });
+    // Manual new session created recently: the resolver keeps using it until its own timeout elapses.
+    const manual = await service.startNew("user-a", minutes(62));
+    expect((await service.resolveActive("user-a", minutes(80))).session.id).toBe(manual.id);
+    expect((await service.resolveActive("user-a", minutes(92))).session.id).toBe(manual.id); // 30 min after creation still active
+    expect((await service.resolveActive("user-a", minutes(93))).session.id).not.toBe(manual.id);
+    // No wall-clock dependence: everything above used injected timestamps.
+    expect(await service.getActive("user-a", minutes(200))).not.toMatchObject({ id: manual.id });
+  });
+});

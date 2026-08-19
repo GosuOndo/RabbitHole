@@ -10,9 +10,20 @@ type ProfileResponse = {
   user: { explorationPreference: number; onboardingCompleted: boolean };
   onboarding: { completed: boolean; topics: { key: string; label: string }[]; difficultyPreference: string | null; durationPreference: string | null };
   session: { id: string; interactionCount: number } | null;
-  longTermProfile: { isEmpty: boolean; includesOnboarding: boolean; tags: { key: string; label: string; strength: number; signal: number }[] };
+  longTermProfile: { isEmpty: boolean; includesOnboarding: boolean; interactionCount: number; tags: { key: string; label: string; strength: number; signal: number }[] };
   sessionProfile: { isEmpty: boolean; tags: { key: string; strength: number }[] };
+  sessionFocus: {
+    available: boolean;
+    meaningfulInteractions: number;
+    evidence: number;
+    evidenceConfidence: number;
+    coherence: number;
+    confidence: number;
+    blendWeight: number;
+    topFeatures: { key: string; label: string; strength: number }[];
+  };
   stats: { totalInteractions: number; byType: Record<string, number>; savedProjects: number; currentSessionInteractions: number };
+  config: { sessionTimeoutMinutes: number; maxSessionBlendWeight: number };
 };
 
 async function fetchProfile(request: APIRequestContext): Promise<ProfileResponse> {
@@ -139,7 +150,7 @@ test.describe("onboarding", () => {
 });
 
 test.describe("interactions and profiles", () => {
-  test("saving a project through the UI records interactions and updates both profiles", async ({ page, request }) => {
+  test("saving a project through the UI records interactions into the current session; long-term taste absorbs it once the session ends", async ({ page, request }) => {
     const before = await fetchProfile(request);
 
     await page.goto("/project/build-your-own-redis");
@@ -157,10 +168,20 @@ test.describe("interactions and profiles", () => {
     expect(after.session).not.toBeNull();
     expect(after.session?.interactionCount).toBeGreaterThanOrEqual(2);
     expect(after.stats.currentSessionInteractions).toBe(after.session?.interactionCount);
+    // The current session reflects the save immediately, with real adaptive-influence diagnostics…
     expect(after.sessionProfile.isEmpty).toBe(false);
     expect(after.sessionProfile.tags.map((t) => t.key)).toContain("systems");
-    expect(after.longTermProfile.tags.find((t) => t.key === "systems")?.signal ?? 0).toBeGreaterThan(
+    expect(after.sessionFocus.available).toBe(true);
+    expect(after.sessionFocus.evidence).toBeGreaterThanOrEqual(2.5); // OPEN 0.5 + SAVE 2
+    expect(after.sessionFocus.confidence).toBeGreaterThan(0);
+    expect(after.sessionFocus.blendWeight).toBeGreaterThan(0);
+    expect(after.sessionFocus.blendWeight).toBeLessThanOrEqual(after.config.maxSessionBlendWeight);
+    expect(after.sessionFocus.topFeatures.map((f) => f.key)).toContain("systems");
+    // …while the long-term profile (onboarding + earlier sessions) is not double-counted with the active session.
+    expect(after.longTermProfile.interactionCount).toBe(before.longTermProfile.interactionCount);
+    expect(after.longTermProfile.tags.find((t) => t.key === "systems")?.signal ?? 0).toBeCloseTo(
       before.longTermProfile.tags.find((t) => t.key === "systems")?.signal ?? 0,
+      6,
     );
   });
 
@@ -174,6 +195,7 @@ test.describe("interactions and profiles", () => {
     const before = await fetchProfile(request);
     const previousSessionId = before.session?.id;
     expect(previousSessionId).toBeTruthy();
+    expect(before.sessionFocus.available).toBe(true);
 
     await page.getByRole("button", { name: "Start new session" }).click();
     await expect(page.getByText("New session started.")).toBeVisible();
@@ -184,9 +206,16 @@ test.describe("interactions and profiles", () => {
     expect(after.session?.id).not.toBe(previousSessionId);
     expect(after.stats.currentSessionInteractions).toBe(0);
     expect(after.sessionProfile.isEmpty).toBe(true);
-    // Long-term taste is untouched by starting a new session.
-    expect(after.longTermProfile.tags.map((t) => t.key)).toContain("systems");
+    expect(after.sessionFocus.available).toBe(false);
+    expect(after.sessionFocus.blendWeight).toBe(0);
+    // History is kept: nothing deleted, saved state intact, and the ended session's behaviour now counts as long-term taste.
     expect(after.stats.totalInteractions).toBe(before.stats.totalInteractions);
+    expect(after.stats.savedProjects).toBe(before.stats.savedProjects);
+    expect(after.longTermProfile.tags.map((t) => t.key)).toContain("systems");
+    expect(after.longTermProfile.interactionCount).toBeGreaterThan(before.longTermProfile.interactionCount);
+    expect(after.longTermProfile.tags.find((t) => t.key === "systems")?.signal ?? 0).toBeGreaterThan(
+      before.longTermProfile.tags.find((t) => t.key === "systems")?.signal ?? 0,
+    );
   });
 });
 

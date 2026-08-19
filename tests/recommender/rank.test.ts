@@ -220,3 +220,87 @@ describe("hybrid ranking with collaborative evidence", () => {
     expect(cold.content!).toBeGreaterThan(cold.collaborative!);
   });
 });
+
+describe("session-aware ranking weights (Phase 6)", () => {
+  const withSession: ScoreComponent[] = ["content", "collaborative", "session", "novelty", "popularity"];
+  const noSession: ScoreComponent[] = ["content", "collaborative", "novelty", "popularity"];
+  const sum = (weights: Partial<Record<ScoreComponent, number>>) => Object.values(weights).reduce((s, w) => s + (w ?? 0), 0);
+
+  it("no session → the Phase 5 weights are unchanged; a session with zero confidence carries zero weight", () => {
+    for (const e of [0, 0.35, 1]) {
+      const phase5 = resolveRankingWeights(noSession, { explorationPreference: e });
+      const zeroConfidence = resolveRankingWeights(withSession, { explorationPreference: e, sessionConfidence: 0 });
+      expect(zeroConfidence.session).toBe(0);
+      for (const c of noSession) expect(zeroConfidence[c]).toBeCloseTo(phase5[c]!, 10);
+      expect(resolveRankingWeights(withSession, { explorationPreference: e }).session).toBe(0);
+    }
+  });
+
+  it("weak session → a very small session weight; strong coherent session → raw weight approaching the configured base", () => {
+    const weak = resolveRankingWeights(withSession, { sessionConfidence: 0.1 });
+    const strong = resolveRankingWeights(withSession, { sessionConfidence: 0.95 });
+    expect(weak.session).toBeGreaterThan(0);
+    expect(weak.session).toBeLessThan(0.015);
+    expect(strong.session).toBeGreaterThan(weak.session!);
+    // Raw session weight = base.session × confidence, i.e. 0.095 of a 0.945 total at e = 0.
+    expect(strong.session).toBeCloseTo((base.session * 0.95) / (0.45 + 0.25 + base.session * 0.95 + 0.05 + 0.1), 10);
+    expect(resolveRankingWeights(withSession, { sessionConfidence: 1 }).session).toBeCloseTo(base.session / (0.85 + base.session), 10);
+    expect(resolveRankingWeights(withSession, { sessionConfidence: 5 }).session).toBeCloseTo(base.session / (0.85 + base.session), 10); // clamped
+    expect(resolveRankingWeights(withSession, { sessionConfidence: Number.NaN }).session).toBe(0);
+  });
+
+  it("exploration still moves content/collaborative/novelty exactly as in Phase 5 with a session present, and weights sum to 1", () => {
+    for (const e of [0, 0.35, 1]) {
+      const w = resolveRankingWeights(withSession, { explorationPreference: e, sessionConfidence: 0.6 });
+      const rawSession = base.session * 0.6;
+      const total = 0.45 - 0.15 * e + (0.25 - 0.05 * e) + rawSession + (0.05 + 0.3 * e) + 0.1;
+      expect(w.content).toBeCloseTo((0.45 - 0.15 * e) / total, 10);
+      expect(w.collaborative).toBeCloseTo((0.25 - 0.05 * e) / total, 10);
+      expect(w.novelty).toBeCloseTo((0.05 + 0.3 * e) / total, 10);
+      expect(w.popularity).toBeCloseTo(0.1 / total, 10);
+      expect(w.session).toBeCloseTo(rawSession / total, 10);
+      expect(sum(w)).toBeCloseTo(1, 10);
+    }
+    // The two controls move different dimensions: exploration changes novelty, confidence changes session.
+    const lowE = resolveRankingWeights(withSession, { explorationPreference: 0, sessionConfidence: 0.6 });
+    const highE = resolveRankingWeights(withSession, { explorationPreference: 1, sessionConfidence: 0.6 });
+    expect(highE.novelty).toBeGreaterThan(lowE.novelty!);
+    expect(highE.session! / highE.content!).toBeGreaterThan(lowE.session! / lowE.content!); // relative only, the raw session weight is unchanged
+    const lowC = resolveRankingWeights(withSession, { explorationPreference: 0.35, sessionConfidence: 0.2 });
+    const highC = resolveRankingWeights(withSession, { explorationPreference: 0.35, sessionConfidence: 0.9 });
+    expect(highC.session).toBeGreaterThan(lowC.session!);
+    expect(highC.novelty! / highC.content!).toBeCloseTo(lowC.novelty! / lowC.content!, 10);
+  });
+
+  it("keeps the cold-start popularity multiplier with a session present", () => {
+    const cold = resolveRankingWeights(withSession, { coldStart: true, sessionConfidence: 0.5 });
+    const warm = resolveRankingWeights(withSession, { coldStart: false, sessionConfidence: 0.5 });
+    const rawSession = base.session * 0.5;
+    expect(cold.popularity).toBeCloseTo((0.1 * RECOMMENDER_CONFIG.coldStart.popularityWeightMultiplier) / (0.45 + 0.25 + rawSession + 0.05 + 0.3), 10);
+    expect(cold.popularity).toBeGreaterThan(warm.popularity!);
+    expect(cold.session).toBeLessThan(warm.session!);
+    expect(sum(cold)).toBeCloseTo(1, 10);
+  });
+
+  it("ranks with the session component: null when unavailable, real 0 when unaligned, and never rewards negative affinity", () => {
+    const weights = resolveRankingWeights(withSession, { sessionConfidence: 0.8 });
+    const ranked = rankCandidates(
+      [
+        { projectId: "aligned", slug: "aligned", popularityPrior: 0.5, sources: ["content"], signals: { content: 0.5, session: 0.9, novelty: 0.3, popularity: 0.5 } },
+        { projectId: "unaligned", slug: "unaligned", popularityPrior: 0.5, sources: ["content"], signals: { content: 0.5, session: 0, novelty: 0.3, popularity: 0.5 } },
+        { projectId: "negative", slug: "negative", popularityPrior: 0.5, sources: ["content"], signals: { content: 0.5, session: -0.7, novelty: 0.3, popularity: 0.5 } },
+        { projectId: "unknown", slug: "unknown", popularityPrior: 0.5, sources: ["content"], signals: { content: 0.5, novelty: 0.3, popularity: 0.5 } },
+      ],
+      { weights },
+    );
+    const by = (id: string) => ranked.find((r) => r.projectId === id)!;
+    expect(by("aligned").breakdown.session).toBe(0.9);
+    expect(by("unaligned").breakdown.session).toBe(0);
+    expect(by("negative").breakdown.session).toBe(0); // clamped, never a penalty below "no alignment"
+    expect(by("unknown").breakdown.session).toBeNull();
+    expect(by("aligned").score).toBeGreaterThan(by("unaligned").score);
+    expect(by("unaligned").score).toBeCloseTo(by("negative").score, 10);
+    expect(by("unaligned").score).toBeCloseTo(by("unknown").score, 10);
+    expect(by("aligned").score - by("unaligned").score).toBeCloseTo(weights.session! * 0.9, 10);
+  });
+});

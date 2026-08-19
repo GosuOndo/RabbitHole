@@ -88,8 +88,10 @@ export default async function InsightsPage() {
         title="What RabbitHole thinks you like"
         description={
           <>
-            Real values computed from your behaviour. Bars show relative strength (max-normalised), not probabilities. Long-term taste decays
-            with a {snapshot.config.halfLifeDays}-day half-life; the session profile only looks at the current session.
+            Real values computed from your behaviour. Bars show relative strength (max-normalised), not probabilities. Long-term taste is your
+            onboarding answers plus earlier sessions, decaying with a {snapshot.config.halfLifeDays}-day half-life; the session profile only
+            looks at the current session and steers the feed with an adaptive weight (currently {Math.round(snapshot.sessionFocus.blendWeight * 100)}%
+            of the effective profile, at most {Math.round(snapshot.config.maxSessionBlendWeight * 100)}%).
           </>
         }
         actions={<SessionControls />}

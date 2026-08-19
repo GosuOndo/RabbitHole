@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
-import { buildSessionProfile, EMPTY_PROFILE } from "@/lib/recommender/profile";
+import { EMPTY_PROFILE } from "@/lib/recommender/profile";
 import { recommendForUser, runRecommendationPipeline, type RecommenderDeps } from "@/lib/recommender/recommend";
 import type { CollaborativeInteraction } from "@/lib/recommender/types";
 import {
@@ -12,6 +12,7 @@ import {
   onboardingProfile,
   profileInput,
   projectBySlug,
+  sessionOf,
 } from "../helpers/catalog-fixture";
 import { clusterInteractions, ev } from "../helpers/collaborative-fixture";
 
@@ -109,25 +110,28 @@ describe("runRecommendationPipeline", () => {
     expect(output.pipeline.final).toBe(10);
   });
 
-  it("modestly blends the current session into retrieval without erasing long-term taste", () => {
+  it("blends the current session into retrieval adaptively without erasing long-term taste", () => {
     const longTerm = onboardingProfile(["systems", "databases"]);
-    const session = buildSessionProfile({
-      interactions: interactionsOn([
+    const moderate = run(
+      profileInput(longTerm, sessionOf([
         { slug: "implement-a-ray-tracer", type: "OPEN" },
         { slug: "webgl-fluid-simulation", type: "SAVE" },
         { slug: "live-shader-playground", type: "SAVE" },
-      ]),
-      now: NOW,
-    });
-    const withSession = run(profileInput(longTerm, { session }), 10);
-    const without = run(profileInput(longTerm), 10);
-    expect(withSession.context.sessionWeight).toBeCloseTo(RECOMMENDER_CONFIG.session.baseWeight, 10);
-    expect(without.context.sessionWeight).toBe(0);
-    const graphicsRank = withSession.items.filter((i) => projectBySlug(i.projectId).tagSlugs.includes("graphics")).length;
-    const graphicsRankBefore = without.items.filter((i) => projectBySlug(i.projectId).tagSlugs.includes("graphics")).length;
-    expect(graphicsRank).toBeGreaterThanOrEqual(graphicsRankBefore);
-    // Long-term taste still leads the feed.
-    expect(projectBySlug(withSession.items[0]!.projectId).tagSlugs.some((t) => ["systems", "databases"].includes(t))).toBe(true);
+      ])),
+      30,
+    );
+    const without = run(profileInput(longTerm), 30);
+    expect(moderate.context.session.available).toBe(true);
+    expect(moderate.context.session.blendWeight).toBeGreaterThan(0);
+    expect(moderate.context.session.blendWeight).toBeLessThanOrEqual(RECOMMENDER_CONFIG.session.maxBlendWeight);
+    expect(without.context.session.available).toBe(false);
+    expect(without.context.session.blendWeight).toBe(0);
+    // A moderate session already pulls graphics projects up the ranked list…
+    const bestGraphicsRank = (items: typeof moderate.items) => items.find((i) => projectBySlug(i.projectId).tagSlugs.includes("graphics"))?.preDiversificationRank ?? Number.POSITIVE_INFINITY;
+    expect(bestGraphicsRank(moderate.items)).toBeLessThan(bestGraphicsRank(without.items));
+    // …while long-term taste still leads the feed.
+    expect(projectBySlug(moderate.items[0]!.projectId).tagSlugs.some((t) => ["systems", "databases", "networking"].includes(t))).toBe(true);
+    expect(moderate.items.slice(0, 10).filter((i) => projectBySlug(i.projectId).tagSlugs.some((t) => ["systems", "databases"].includes(t))).length).toBeGreaterThanOrEqual(5);
   });
 
   it("is deterministic given the same inputs", () => {
@@ -425,6 +429,195 @@ describe("cold start with exploration", () => {
     withoutRaftEvidence.set(irrelevantRare, 0);
     const adventurous = run(profileInput(profile, { explorationPreference: 1 }), 10, withoutRaftEvidence, rows);
     expect(adventurous.items.slice(0, 5).some((i) => i.projectId === irrelevantRare)).toBe(false);
+  });
+});
+
+describe("session-aware pipeline (Phase 6)", () => {
+  const GRAPHICS_TAGS = ["graphics", "webgl", "creative-coding", "simulation", "procedural-generation"];
+  const SYSTEMS_TAGS = ["systems", "databases", "networking", "operating-systems", "backend"];
+  const countTagged = (items: { projectId: string }[], tags: string[]) => items.filter((i) => projectBySlug(i.projectId).tagSlugs.some((t) => tags.includes(t))).length;
+  const evidence = new Map<string, number>(catalog.map((p) => [p.id, Math.round(p.popularity * 40)]));
+  const rows = clusterInteractions();
+  const history = [
+    ...rows,
+    ev("target", "build-your-own-redis", "SAVE"),
+    ev("target", "write-an-http-server", "BUILD"),
+    ev("target", "implement-a-dns-resolver", "SAVE"),
+  ];
+  const longTerm = behaviourProfile(
+    interactionsOn([
+      { slug: "build-your-own-redis", type: "SAVE", daysAgo: 3 },
+      { slug: "write-an-http-server", type: "BUILD", daysAgo: 10 },
+      { slug: "implement-a-dns-resolver", type: "SAVE", daysAgo: 2 },
+      { slug: "userspace-tcp-ip-stack", type: "OPEN", daysAgo: 5 },
+      { slug: "toy-container-runtime", type: "SAVE", daysAgo: 1 },
+    ]),
+  );
+  const moderateSession = sessionOf([
+    { slug: "webgl-fluid-simulation", type: "OPEN" },
+    { slug: "live-shader-playground", type: "SAVE" },
+    { slug: "implement-a-ray-tracer", type: "OPEN" },
+    { slug: "procedural-terrain-generator", type: "SAVE" },
+  ]);
+  const strongSession = sessionOf([
+    { slug: "webgl-fluid-simulation", type: "BUILD" },
+    { slug: "live-shader-playground", type: "COMPLETE" },
+    { slug: "implement-a-ray-tracer", type: "BUILD" },
+    { slug: "procedural-terrain-generator", type: "SAVE" },
+    { slug: "software-rasterizer", type: "BUILD" },
+    { slug: "generative-art-playground", type: "SAVE" },
+    { slug: "physically-based-path-tracer", type: "SHARE" },
+  ]);
+  const excluded = new Set(["write-an-http-server"]);
+  const at = (session: Partial<ReturnType<typeof profileInput>> = {}, e = 0, limit = 10) =>
+    run(profileInput(longTerm, { ...session, explorationPreference: e, excludedProjectIds: excluded }), limit, evidence, history);
+
+  it("exposes session diagnostics, a session component only when available, and keeps every retriever working", () => {
+    const none = at();
+    expect(none.context.session).toMatchObject({ available: false, confidence: 0, blendWeight: 0, sessionId: null, topFeatures: [] });
+    expect(none.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    expect(none.items.every((i) => i.breakdown.session === null && i.session === null && i.weights.session === undefined)).toBe(true);
+
+    const focused = at(strongSession);
+    const s = focused.context.session;
+    expect(s.available).toBe(true);
+    expect(s.sessionId).toBe("current");
+    expect(s.meaningfulInteractions).toBe(7);
+    expect(s.evidence).toBe(24);
+    expect(s.evidenceConfidence).toBeCloseTo(24 / 28, 10);
+    expect(s.coherence).toBeGreaterThan(0.5);
+    expect(s.confidence).toBeGreaterThan(0.6);
+    expect(s.blendWeight).toBeGreaterThan(0.25);
+    expect(s.blendWeight).toBeLessThanOrEqual(RECOMMENDER_CONFIG.session.maxBlendWeight);
+    expect(s.topFeatures.length).toBeGreaterThan(0);
+    expect(s.topFeatures.length).toBeLessThanOrEqual(RECOMMENDER_CONFIG.session.topFeatureCount);
+    expect(s.topFeatures.map((f) => f.key)).toContain("graphics");
+    expect(s.topFeatures[0]!.label).toBe("Graphics");
+    expect(focused.context.components).toEqual(["content", "collaborative", "session", "novelty", "popularity"]);
+    expect(focused.items.every((i) => i.breakdown.session !== null && i.session !== null && (i.weights.session ?? 0) > 0)).toBe(true);
+    expect(focused.pipeline.contentCandidates).toBeGreaterThan(0);
+    expect(focused.pipeline.collaborativeCandidates).toBeGreaterThan(0);
+    expect(focused.pipeline.popularCandidates).toBeGreaterThan(0);
+    expect(focused.pipeline.explorationCandidates).toBeGreaterThan(0);
+    expect(focused.context.diversification.applied).toBe(true);
+    expect(focused.items.some((i) => i.rank !== i.preDiversificationRank)).toBe(true);
+    expect(new Set(focused.items.map((i) => i.projectId)).size).toBe(focused.items.length);
+    expect(focused.items.some((i) => excluded.has(i.projectId))).toBe(false);
+    for (const item of focused.items) {
+      expect(Number.isFinite(item.score)).toBe(true);
+      expect(item.session!.score).toBeGreaterThanOrEqual(0);
+      expect(item.session!.score).toBeLessThanOrEqual(1);
+      expect(item.session!.score).toBeCloseTo(item.breakdown.session!, 10);
+    }
+    expect(focused.algorithm).toBe("hybrid-session-v1");
+  });
+
+  it("session ranking is real: a session-aligned project becomes materially more competitive (§43)", () => {
+    const baseline = at({}, 0, 100);
+    const focused = at(strongSession, 0, 100);
+    const find = (output: typeof baseline, slug: string) => output.items.find((i) => i.projectId === slug);
+    const rankOf = (output: typeof baseline, slug: string) => find(output, slug)?.preDiversificationRank ?? output.pipeline.ranked + 1;
+    // A: strong long-term (systems/databases) affinity, weak session affinity.
+    // B: moderate long-term affinity (graphics + systems + algorithms), strong current-session affinity.
+    const a = "lsm-tree-key-value-store";
+    const b = "truetype-font-rasterizer";
+    expect(find(baseline, a)).toBeDefined();
+    expect(find(baseline, b)).toBeDefined();
+    expect(rankOf(baseline, a)).toBeLessThan(rankOf(baseline, b)); // without session evidence A > B
+    expect(find(baseline, b)!.breakdown.session).toBeNull();
+    expect(find(focused, b)!.breakdown.session).toBeGreaterThan(0.4);
+    expect(find(focused, a)!.breakdown.session).toBeLessThan(0.2);
+    // With the strong coherent session B overtakes A (or at least closes most of the gap).
+    expect(rankOf(focused, b)).toBeLessThan(rankOf(baseline, b));
+    expect(rankOf(focused, b) - rankOf(focused, a)).toBeLessThan(rankOf(baseline, b) - rankOf(baseline, a));
+    expect(find(focused, b)!.score).toBeGreaterThan(find(baseline, b)!.score);
+    expect(find(focused, b)!.score - find(focused, a)!.score).toBeGreaterThan(find(baseline, b)!.score - find(baseline, a)!.score);
+  });
+
+  it("a strong session tilts the top-K towards the session focus without erasing long-term taste (§44)", () => {
+    const baseline = at();
+    const focused = at(strongSession);
+    const graphicsBefore = countTagged(baseline.items, GRAPHICS_TAGS);
+    const graphicsAfter = countTagged(focused.items, GRAPHICS_TAGS);
+    expect(graphicsAfter).toBeGreaterThan(graphicsBefore);
+    expect(graphicsAfter).toBeLessThan(focused.items.length); // never 10/10 graphics
+    expect(countTagged(focused.items, SYSTEMS_TAGS)).toBeGreaterThanOrEqual(4);
+    const meanSession = (items: typeof focused.items) => items.reduce((s, i) => s + (i.session?.score ?? 0), 0) / items.length;
+    expect(meanSession(focused.items)).toBeGreaterThan(0.2);
+    // Long-term still explains most of the feed; session wording appears only where it is honest.
+    expect(focused.items.filter((i) => i.explanation.primary === "taste" || i.explanation.primary === "collaborative").length).toBeGreaterThanOrEqual(3);
+    const sessionWorded = focused.items.filter((i) => /session/.test(i.explanation.text));
+    expect(sessionWorded.length).toBeGreaterThan(0);
+    for (const item of sessionWorded) expect(item.session!.score).toBeGreaterThanOrEqual(RECOMMENDER_CONFIG.explanation.minSessionAffinity);
+  });
+
+  it("moderate sessions shift ranks modestly; more coherent evidence shifts more (§11/§16)", () => {
+    const baseline = at({}, 0, 30);
+    const moderate = at(moderateSession, 0, 30);
+    const strong = at(strongSession, 0, 30);
+    expect(moderate.context.session.blendWeight).toBeGreaterThan(0.1);
+    expect(moderate.context.session.blendWeight).toBeLessThan(strong.context.session.blendWeight);
+    const graphicsTop30 = (output: typeof baseline) => countTagged(output.items, GRAPHICS_TAGS);
+    expect(graphicsTop30(moderate)).toBeGreaterThanOrEqual(graphicsTop30(baseline));
+    expect(graphicsTop30(strong)).toBeGreaterThan(graphicsTop30(moderate));
+    expect(moderate.items[0]!.projectId).toBe(baseline.items[0]!.projectId); // long-term still leads
+  });
+
+  it("session ≠ exploration: each control moves its own dimension (§45)", () => {
+    const familiarNoSession = at({}, 0);
+    const familiarSession = at(strongSession, 0);
+    const adventurousNoSession = at({}, 1);
+    const adventurousSession = at(strongSession, 1);
+    // Fixed exploration, session changes → composition moves towards graphics, novelty weight unchanged.
+    expect(countTagged(familiarSession.items, GRAPHICS_TAGS)).toBeGreaterThan(countTagged(familiarNoSession.items, GRAPHICS_TAGS));
+    expect(familiarSession.items[0]!.weights.novelty!).toBeCloseTo(familiarNoSession.items[0]!.weights.novelty! * (familiarSession.items[0]!.weights.content! / familiarNoSession.items[0]!.weights.content!), 6);
+    expect(familiarSession.context.exploration).toEqual(familiarNoSession.context.exploration);
+    expect(familiarSession.context.diversification.lambda).toBe(familiarNoSession.context.diversification.lambda);
+    // Fixed session, exploration changes → novelty/diversity move, session confidence and blend unchanged.
+    expect(adventurousSession.context.session.confidence).toBeCloseTo(familiarSession.context.session.confidence, 10);
+    expect(adventurousSession.context.session.blendWeight).toBeCloseTo(familiarSession.context.session.blendWeight, 10);
+    expect(adventurousSession.items[0]!.weights.novelty!).toBeGreaterThan(familiarSession.items[0]!.weights.novelty!);
+    expect(adventurousSession.context.diversification.lambda).toBeLessThan(familiarSession.context.diversification.lambda);
+    expect(adventurousSession.pipeline.explorationCandidates).toBeGreaterThan(familiarSession.pipeline.explorationCandidates);
+    const meanNovelty = (items: typeof familiarSession.items) => items.reduce((s, i) => s + i.novelty.novelty, 0) / items.length;
+    expect(meanNovelty(adventurousSession.items)).toBeGreaterThan(meanNovelty(familiarSession.items));
+    expect(meanNovelty(adventurousNoSession.items)).toBeGreaterThan(meanNovelty(familiarNoSession.items));
+  });
+
+  it("session ≠ collaborative: breakdowns keep the two signals distinct (§46)", () => {
+    const focused = at(strongSession, 0, 30);
+    const withCollab = focused.items.filter((i) => (i.breakdown.collaborative ?? 0) > 0.3 && (i.breakdown.session ?? 0) < 0.2);
+    const withSession = focused.items.filter((i) => (i.breakdown.session ?? 0) > 0.5 && (i.breakdown.collaborative ?? 0) < 0.3);
+    expect(withCollab.length).toBeGreaterThan(0);
+    expect(withSession.length).toBeGreaterThan(0);
+    for (const item of withCollab) expect(item.collaborative?.seeds.length ?? 0).toBeGreaterThan(0);
+    for (const item of withSession) expect(item.explanation.text).not.toMatch(/People who liked/);
+    expect(focused.context.collaborative.available).toBe(true);
+    expect(focused.context.collaborative.confidence).toBe(at().context.collaborative.confidence); // sessions do not touch CF
+  });
+
+  it("previous-session interactions stay out of the current-session profile and dislikes in-session push away (§47/§30)", () => {
+    const disliking = sessionOf([
+      { slug: "webgl-fluid-simulation", type: "DISLIKE" },
+      { slug: "live-shader-playground", type: "DISLIKE" },
+      { slug: "implement-a-ray-tracer", type: "DISLIKE" },
+    ]);
+    const output = at({ ...disliking, excludedProjectIds: new Set([...excluded, "webgl-fluid-simulation", "live-shader-playground", "implement-a-ray-tracer"]) });
+    expect(output.context.session.available).toBe(true);
+    expect(output.context.session.topFeatures).toEqual([]);
+    expect(output.items.every((i) => !/session/.test(i.explanation.text))).toBe(true);
+    const graphicsItems = output.items.filter((i) => projectBySlug(i.projectId).tagSlugs.includes("graphics"));
+    for (const item of graphicsItems) expect(item.breakdown.session).toBe(0);
+    // The current session never contains earlier-session behaviour: the systems long-term taste is not in the session profile.
+    expect(strongSession.session.signals["tag:networking"]).toBeUndefined();
+    expect(longTerm.signals["tag:graphics"]).toBeUndefined();
+  });
+
+  it("is deterministic with a session present", () => {
+    const a = at(strongSession, 0.35);
+    const b = at(strongSession, 0.35);
+    expect(a.items.map((i) => [i.projectId, i.score, i.rank, i.breakdown.session])).toEqual(b.items.map((i) => [i.projectId, i.score, i.rank, i.breakdown.session]));
+    expect(a.context.session).toEqual(b.context.session);
   });
 });
 

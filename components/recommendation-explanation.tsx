@@ -62,6 +62,7 @@ export function RecommendationExplanation({
   const rows: { label: string; value: number | null; weight?: number }[] = [
     { label: "Content affinity", value: breakdown.content, weight: weights.content },
     { label: "Collaborative signal", value: breakdown.collaborative, weight: weights.collaborative },
+    { label: "Session affinity", value: breakdown.session, weight: weights.session },
     { label: "Novelty", value: breakdown.novelty, weight: weights.novelty },
     { label: "Popularity", value: breakdown.popularity, weight: weights.popularity },
   ];

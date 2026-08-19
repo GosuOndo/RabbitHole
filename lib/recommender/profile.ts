@@ -38,6 +38,8 @@ export interface ProfileInteraction {
   type: InteractionType;
   createdAt: Date;
   sessionId?: string;
+  /** Project id (used to count repeated (project, type) actions once in session evidence). */
+  projectId?: string;
   features: FeatureVector;
 }
 

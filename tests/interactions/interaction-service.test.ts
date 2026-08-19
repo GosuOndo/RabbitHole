@@ -72,3 +72,19 @@ describe("interactionService.record", () => {
     expect(withoutDwell.interaction.weight).toBe(0);
   });
 });
+
+describe("interactions after a manual new session (Phase 6)", () => {
+  it("keep previous interactions intact and attach new ones to the new session", async () => {
+    const { service, sessionRepository, interactions } = setup();
+    const sessions = createSessionService(sessionRepository, { timeoutMinutes: RECOMMENDER_CONFIG.session.timeoutMinutes });
+    const before = await service.record({ userId: "user-a", projectId: "project-1", type: "SAVE", now: T0 });
+    const fresh = await sessions.startNew("user-a", minutes(2));
+    const after = await service.record({ userId: "user-a", projectId: "project-2", type: "OPEN", now: minutes(3) });
+    expect(after.session.id).toBe(fresh.id);
+    expect(after.interaction.sessionId).toBe(fresh.id);
+    expect(after.interaction.sessionId).not.toBe(before.interaction.sessionId);
+    expect(interactions.interactions).toHaveLength(2);
+    expect(interactions.interactions[0]!.sessionId).toBe(before.session.id); // history untouched
+    expect(sessionRepository.get(before.session.id)?.endedAt).toEqual(minutes(2));
+  });
+});

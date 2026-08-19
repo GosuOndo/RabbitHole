@@ -12,16 +12,17 @@ type FeedResponse = {
   items: {
     rank: number;
     score: number;
-    project: { id: string; slug: string; title: string };
     explanation: { text: string; primary: string; factors: { kind: string; features: { id: string; label: string }[] }[] };
     preDiversificationRank: number;
     sources: string[];
-    breakdown: { content: number | null; collaborative: number | null; novelty: number | null; popularity: number | null };
-    weights: { content?: number; collaborative?: number; novelty?: number; popularity?: number };
+    breakdown: { content: number | null; collaborative: number | null; session: number | null; novelty: number | null; popularity: number | null };
+    weights: { content?: number; collaborative?: number; session?: number; novelty?: number; popularity?: number };
     collaborative: { score: number; confidence: number; seeds: { projectId: string; slug: string; title: string; state: string; similarity: number }[] } | null;
     novelty: { novelty: number; underexposure: number; adjacency: number };
     exploration: { explorationScore: number; plausibility: number; plausibilitySource: string } | null;
     diversification: { mmrScore: number; maxSimilarityToSelected: number; admittedUnderRelaxation: boolean };
+    session: { raw: number; score: number } | null;
+    project: { id: string; slug: string; title: string; tags: { slug: string; name: string }[] };
   }[];
   pipeline: {
     contentCandidates: number;
@@ -38,12 +39,26 @@ type FeedResponse = {
   context: {
     coldStart: boolean;
     profileEmpty: boolean;
+    session: {
+      available: boolean;
+      sessionId: string | null;
+      meaningfulInteractions: number;
+      evidence: number;
+      evidenceConfidence: number;
+      coherence: number;
+      confidence: number;
+      blendWeight: number;
+      topFeatures: { id: string; key: string; label: string; strength: number }[];
+    };
     collaborative: { available: boolean; seedCount: number; confidence: number; candidatesWithEvidence: number };
     exploration: { preference: number; mode: string; candidateLimit: number };
     diversification: { applied: boolean; lambda: number; maxTagShare: number; maxPerTag: number; relaxationLevel: number };
     components: string[];
   };
 };
+
+const GRAPHICS_TAGS = ["graphics", "webgl", "creative-coding", "simulation", "procedural-generation"];
+const countTagged = (items: FeedResponse["items"], tags: string[]) => items.filter((i) => i.project.tags.some((t) => tags.includes(t.slug))).length;
 
 async function setExplorationPreference(request: APIRequestContext, value: number): Promise<void> {
   const response = await request.patch("/api/profile", { data: { explorationPreference: value } });
@@ -112,9 +127,11 @@ test.describe("recommendation API", () => {
     expect(typeof feed.pipeline.collaborativeCandidates).toBe("number");
     expect(feed.context.collaborative.available).toBe(true);
     expect(feed.context.collaborative.seedCount).toBeGreaterThan(0);
-    expect(feed.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    // The session component is present only when the current session carries meaningful evidence.
+    expect(feed.context.components.filter((c) => c !== "session")).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    expect(feed.context.components.includes("session")).toBe(feed.context.session.available);
     for (const item of feed.items) {
-      for (const key of ["content", "collaborative", "novelty", "popularity"] as const) {
+      for (const key of ["content", "collaborative", "session", "novelty", "popularity"] as const) {
         const value = item.breakdown[key];
         expect(value === null || (typeof value === "number" && Number.isFinite(value))).toBe(true);
       }
@@ -428,5 +445,128 @@ test.describe("discover feed", () => {
       await page.keyboard.press("s");
       await expect(page).toHaveURL(/\/saved/);
     }
+  });
+
+  test("session drift: coherent session behaviour tilts the feed, a new session (keyboard-activated button) clears it, history survives", async ({ page, request }) => {
+    const GRAPHICS_SLUGS = ["webgl-fluid-simulation", "live-shader-playground", "implement-a-ray-tracer", "procedural-terrain-generator", "software-rasterizer"];
+
+    // 1. Clean baseline in a fresh session.
+    expect((await request.post("/api/sessions")).status()).toBe(201);
+    const profileBefore = await (await request.get("/api/profile")).json();
+    const baseline = await fetchFeed(request, 30);
+    expect(baseline.context.session.available).toBe(false);
+    expect(baseline.context.session.blendWeight).toBe(0);
+    expect(baseline.context.components).not.toContain("session");
+    expect(baseline.items.every((i) => i.breakdown.session === null && i.session === null)).toBe(true);
+    const graphicsBefore = countTagged(baseline.items, GRAPHICS_TAGS);
+    const top10Before = baseline.items.slice(0, 10).map((i) => i.project.id);
+
+    await page.goto("/discover");
+    await expect(page.getByTestId("session-focus")).toContainText("No strong session focus yet.");
+    const startButton = page.getByRole("button", { name: "Start new session" });
+    await expect(startButton).toBeVisible();
+    expect(await startButton.evaluate((el) => el.tagName)).toBe("BUTTON");
+
+    // 2. Several coherent graphics interactions through the real UI: opening each page records OPEN, then Save / Build.
+    for (const [index, slug] of GRAPHICS_SLUGS.entries()) {
+      await page.goto(`/project/${slug}`);
+      await expect(page.getByTestId("project-actions")).toBeVisible();
+      if (index < 3) {
+        await page.getByRole("button", { name: "Save", exact: true }).click();
+        await expect(page.getByRole("button", { name: /Saved ✓/ })).toBeVisible();
+      } else if (index === 3) {
+        await page.getByRole("button", { name: "Build this" }).click();
+        await expect(page.getByRole("button", { name: "Mark as completed" })).toBeVisible();
+      }
+    }
+    await expect.poll(async () => ((await (await request.get("/api/profile")).json()).sessionFocus.meaningfulInteractions as number), { timeout: 10_000 }).toBeGreaterThanOrEqual(7);
+
+    // 3. The feed is now session-aware: diagnostics, composition and explanations.
+    const focusedProfile = await (await request.get("/api/profile")).json();
+    expect(focusedProfile.sessionFocus.available).toBe(true);
+    expect(focusedProfile.sessionFocus.topFeatures.map((f: { key: string }) => f.key)).toContain("graphics");
+    const focused = await fetchFeed(request, 30);
+    const s = focused.context.session;
+    expect(s.available).toBe(true);
+    expect(s.sessionId).toBe(focusedProfile.session.id);
+    expect(s.evidence).toBeGreaterThanOrEqual(12); // 5 × OPEN + 3 × SAVE + 1 × BUILD
+    expect(s.confidence).toBeGreaterThan(0.4);
+    expect(s.blendWeight).toBeGreaterThan(0.15);
+    expect(s.blendWeight).toBeLessThanOrEqual(0.45);
+    expect(s.topFeatures.map((f) => f.key)).toContain("graphics");
+    expect(focused.context.components).toContain("session");
+    expect(focused.items.every((i) => i.breakdown.session !== null && i.session !== null && (i.weights.session ?? 0) > 0)).toBe(true);
+    expect(new Set(focused.items.map((i) => i.project.id)).size).toBe(focused.items.length);
+    const graphicsDuring = countTagged(focused.items, GRAPHICS_TAGS);
+    expect(graphicsDuring).toBeGreaterThan(graphicsBefore);
+    const top10During = focused.items.slice(0, 10).map((i) => i.project.id);
+    expect(top10During).not.toEqual(top10Before);
+    expect(focused.items.some((i) => (i.breakdown.session ?? 0) >= 0.5)).toBe(true);
+    expect(focused.items.some((i) => /session/.test(i.explanation.text))).toBe(true);
+    // Long-term taste is still there, and terminal states (the built graphics project, earlier dislikes) stay excluded.
+    expect(focused.items.filter((i) => i.project.tags.some((t) => ["systems", "databases", "networking"].includes(t.slug))).length).toBeGreaterThanOrEqual(5);
+    expect(focused.items.some((i) => i.project.slug === GRAPHICS_SLUGS[3])).toBe(false);
+
+    // UI: the current-session indicator names the focus; a card's breakdown shows the Session affinity row.
+    await page.goto("/discover");
+    await expect(page.getByTestId("session-focus")).toContainText("Graphics");
+    await expect(page.getByTestId("session-focus")).toContainText("session influence");
+    const firstCard = page.getByTestId("recommendation-card").first();
+    await firstCard.getByRole("button", { name: "Why?" }).click();
+    await expect(firstCard.getByTestId("recommendation-explanation")).toContainText("Session affinity");
+
+    // 4. Start a new session from the keyboard: Tab to the button and press Enter, then the feed refreshes.
+    await expect(page.getByTestId("recommendation-feed")).toHaveAttribute("data-hydrated", "true");
+    await page.getByRole("slider", { name: "Discovery mode" }).focus();
+    const explorationBefore = (await (await request.get("/api/profile")).json()).user.explorationPreference as number;
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "Start new session" })).toBeFocused();
+    const refetch = page.waitForResponse((response) => response.url().includes("/api/recommendations") && response.request().method() === "GET");
+    await page.keyboard.press("Enter");
+    expect((await refetch).ok()).toBe(true);
+    await expect(page.getByTestId("session-message")).toContainText("New session started.");
+    await expect(page.getByTestId("feed-message")).toContainText("New session started");
+    await expect(page.getByTestId("session-focus")).toContainText("No strong session focus yet.");
+
+    // 5. Session influence is cleared; history, saved state, exclusions and the exploration preference survive.
+    const afterProfile = await (await request.get("/api/profile")).json();
+    expect(afterProfile.session.id).not.toBe(focusedProfile.session.id);
+    expect(afterProfile.sessionFocus.available).toBe(false);
+    // Nothing is deleted: every behavioural count is intact (impressions may have grown while the page was open).
+    expect(afterProfile.stats.totalInteractions).toBeGreaterThanOrEqual(focusedProfile.stats.totalInteractions);
+    for (const type of ["OPEN", "SAVE", "BUILD", "DISLIKE", "COMPLETE", "SHARE", "UNSAVE"]) {
+      expect(afterProfile.stats.byType[type]).toBe(focusedProfile.stats.byType[type]);
+    }
+    expect(afterProfile.stats.savedProjects).toBe(focusedProfile.stats.savedProjects);
+    expect(afterProfile.stats.builtProjects).toBe(focusedProfile.stats.builtProjects);
+    expect(afterProfile.stats.dislikedProjects).toBe(focusedProfile.stats.dislikedProjects);
+    expect(afterProfile.user.explorationPreference).toBeCloseTo(explorationBefore, 6);
+    // The session-specific influence is gone: no session component, weight or wording, and the ranking changes again.
+    // (The ended session's behaviour now counts as ordinary history, so long-term taste itself may have moved — see README.)
+    const reset = await fetchFeed(request, 30);
+    expect(reset.context.session.available).toBe(false);
+    expect(reset.context.session.blendWeight).toBe(0);
+    expect(reset.context.session.topFeatures).toEqual([]);
+    expect(reset.context.components).not.toContain("session");
+    expect(reset.items.every((i) => i.breakdown.session === null && i.session === null && i.weights.session === undefined)).toBe(true);
+    expect(reset.items.every((i) => !/session/.test(i.explanation.text))).toBe(true);
+    expect(reset.items.slice(0, 10).map((i) => i.project.id)).not.toEqual(top10During);
+    expect(reset.items.some((i) => i.project.slug === GRAPHICS_SLUGS[3])).toBe(false); // BUILD stays excluded
+    expect(new Set(reset.items.map((i) => i.project.id)).size).toBe(reset.items.length);
+    // Long-term taste (systems) is still represented after the reset.
+    expect(reset.items.filter((i) => i.project.tags.some((t) => ["systems", "databases", "networking"].includes(t.slug))).length).toBeGreaterThanOrEqual(5);
+
+    // Interactions after the reset belong to the new session (the open page may also record impressions into it).
+    const opened = await request.post("/api/interactions", { data: { projectId: baseline.items[0]!.project.id, type: "OPEN" } });
+    expect(opened.ok()).toBe(true);
+    const openedBody = await opened.json();
+    expect(openedBody.session.id).toBe(afterProfile.session.id);
+    expect(openedBody.session.created).toBe(false);
+    const finalProfile = await (await request.get("/api/profile")).json();
+    expect(finalProfile.session.id).toBe(afterProfile.session.id);
+    expect(finalProfile.stats.currentSessionInteractions).toBeGreaterThanOrEqual(1);
+    expect(finalProfile.stats.byType.OPEN).toBe(afterProfile.stats.byType.OPEN + 1);
+    expect(finalProfile.sessionFocus.meaningfulInteractions).toBe(1);
+    expect(profileBefore.stats.totalInteractions).toBeLessThan(finalProfile.stats.totalInteractions);
   });
 });

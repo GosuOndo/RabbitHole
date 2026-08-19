@@ -83,6 +83,8 @@ export async function loadRecommendationProfile(userId: string, now: Date): Prom
   return {
     longTerm: data.longTerm,
     session: data.session,
+    sessionInteractions: data.sessionInteractions,
+    sessionId: data.activeSession?.id ?? null,
     excludedProjectIds,
     savedProjectIds,
     explorationPreference: data.user.explorationPreference,

@@ -4,7 +4,7 @@ import { loadCatalogItems, loadPopularityEvidence } from "@/lib/recommendations/
 import { toProjectSummary } from "@/lib/recommendations/recommendation-service";
 import { computeNovelty } from "@/lib/recommender/novelty";
 import { computePopularityScores } from "@/lib/recommender/popularity";
-import { blendProfiles } from "@/lib/recommender/session";
+import { adaptiveEffectiveProfile } from "@/lib/recommender/session";
 import { cosineSimilarity } from "@/lib/recommender/similarity";
 import { applySavedFilters, sortSavedProjects, type SavedFilters, type SavedProjectItem } from "./saved-filters";
 
@@ -25,7 +25,8 @@ export interface SavedProjectsPage {
 /** Saved projects for a user with live content-match and novelty scores, filters and sorting. */
 export async function getSavedProjects(userId: string, filters: SavedFilters = {}, now: Date = new Date()): Promise<SavedProjectsPage> {
   const [data, catalog, popularityEvidence] = await Promise.all([loadUserProfileData(userId, now), loadCatalogItems(), loadPopularityEvidence()]);
-  const effective = blendProfiles(data.longTerm, data.session);
+  // Same adaptive effective profile the feed uses, so "match" on /saved agrees with the feed.
+  const { effective } = adaptiveEffectiveProfile(data.longTerm, data.session, data.sessionInteractions);
   const hasProfile = Object.keys(effective.vector).length > 0;
   const byId = new Map(catalog.map((item) => [item.id, item]));
   const popularity = computePopularityScores(catalog, popularityEvidence);

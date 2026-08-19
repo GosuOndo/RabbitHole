@@ -6,6 +6,7 @@ import type { InteractionType } from "@/generated/prisma/enums";
 import { EmptyState } from "@/components/empty-state";
 import { ExplorationSlider } from "@/components/exploration-slider";
 import { RecommendationCard, type RecommendationCardState } from "@/components/recommendation-card";
+import { SessionControls, SessionFocus } from "@/components/session-controls";
 import { Button } from "@/components/ui/button";
 import { IMPRESSION_VISIBILITY_THRESHOLD, createImpressionTracker } from "@/lib/client/impressions";
 import { postInteraction } from "@/lib/client/interactions";
@@ -32,7 +33,7 @@ function describeContext(context: RecommendationFeedData["context"]): string {
   else parts.push(`Personalised from ${context.weightedInteractionCount} weighted interactions`);
   if (context.includesOnboarding) parts.push("your onboarding answers");
   let text = parts.length === 2 ? `${parts[0]} and ${parts[1]}.` : `${parts[0]}.`;
-  if (context.sessionWeight > 0) text += " Includes a touch of what you explored this session.";
+  if (context.session.blendWeight > 0) text += " Includes what you've been exploring this session.";
   if (context.exploration.mode === "adventurous") text += " Adventurous mode: more novel and varied picks that stay relevant.";
   else if (context.exploration.mode === "familiar") text += " Familiar mode: confident matches first.";
   return text;
@@ -141,27 +142,30 @@ export function RecommendationFeed({
     }
   }, [initial.limit]);
 
-  /** Re-requests the feed from scratch (after the exploration preference changed) and replaces the list. */
-  const reloadFeed = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch(`/api/recommendations?limit=${initial.limit}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(`Could not refresh recommendations (${response.status}).`);
-      const feed = (await response.json()) as RecommendationFeedData;
-      const fresh = feed.items.filter((item) => !dismissedRef.current.has(item.project.id));
-      setContext(feed.context);
-      setStatuses((previous) => Object.fromEntries(fresh.map((item) => [item.project.id, previous[item.project.id] ?? defaultStatus(item)])));
-      setItems(fresh);
-      setCurrentIndex(0);
-      setExplanationFor(null);
-      setExhausted(fresh.length === 0);
-      setFeedMessage("Feed refreshed for your discovery mode.");
-    } catch (error) {
-      setFeedMessage(error instanceof Error ? error.message : "Could not refresh recommendations.");
-    } finally {
-      setLoading(false);
-    }
-  }, [initial.limit]);
+  /** Re-requests the feed from scratch (exploration preference or session changed) and replaces the list. */
+  const reloadFeed = useCallback(
+    async (message: string) => {
+      setLoading(true);
+      try {
+        const response = await fetch(`/api/recommendations?limit=${initial.limit}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`Could not refresh recommendations (${response.status}).`);
+        const feed = (await response.json()) as RecommendationFeedData;
+        const fresh = feed.items.filter((item) => !dismissedRef.current.has(item.project.id));
+        setContext(feed.context);
+        setStatuses((previous) => Object.fromEntries(fresh.map((item) => [item.project.id, previous[item.project.id] ?? defaultStatus(item)])));
+        setItems(fresh);
+        setCurrentIndex(0);
+        setExplanationFor(null);
+        setExhausted(fresh.length === 0);
+        setFeedMessage(message);
+      } catch (error) {
+        setFeedMessage(error instanceof Error ? error.message : "Could not refresh recommendations.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [initial.limit],
+  );
 
   // ---- per-card actions ------------------------------------------------------
   const setStatus = (projectId: string, patch: Partial<RecommendationCardState>) =>
@@ -285,9 +289,13 @@ export function RecommendationFeed({
           thresholds={explorationLabels}
           onCommitted={async (value) => {
             setExplorationPreference(value);
-            await reloadFeed();
+            await reloadFeed("Feed refreshed for your discovery mode.");
           }}
         />
+        <div className="flex flex-col gap-2 border-t border-border pt-3 sm:flex-row sm:items-center sm:justify-between" data-testid="session-panel">
+          <SessionFocus session={context.session} />
+          <SessionControls onStarted={() => reloadFeed("New session started — feed refreshed.")} />
+        </div>
       </div>
 
       <p className="min-h-4 text-sm text-muted" aria-live="polite" data-testid="feed-message">

@@ -30,7 +30,7 @@ export default async function DiscoverPage() {
       <PageHeader
         eyebrow="Discover"
         title="What should you build next?"
-        description="Ranked by how well each project matches your taste, then lightly diversified. Scores are match scores, not probabilities — open “Why?” on any card to see the signals, and use Discovery mode to lean familiar or adventurous."
+        description="Ranked by how well each project matches your taste — long-term and what you're exploring this session — then lightly diversified. Scores are match scores, not probabilities: open “Why?” on any card to see the signals, use Discovery mode to lean familiar or adventurous, and start a new session to clear the current session's influence."
       />
       <RecommendationFeed initial={feed} explorationLabels={RECOMMENDER_CONFIG.exploration.labels} />
     </div>

@@ -7,8 +7,11 @@
  *                                                        and content affinity is meaningful
  *   - "Based on the interests you selected during     same, but the profile is
  *      onboarding: X, Y."                                onboarding-only (cold start)
- *   - "You recently explored X projects in this        session profile has positive signal
- *      session."                                         on the project's tags
+ *   - "You've been exploring X projects in this         meaningful current session (confidence
+ *      session." / "Your current session has shifted     above threshold), positive session
+ *      towards X, while this still matches your          affinity and positive session signal on
+ *      broader Y interests."                             the project's tags; leads only when the
+ *                                                        session is the strongest honest reason
  *   - "Fits your preference for weekend-sized          positive difficulty / duration /
  *      advanced Rust projects."                          language features in the profile
  *   - "Popular with RabbitHole users…"                 popularity score above threshold
@@ -63,8 +66,10 @@ export interface ExplanationInput {
   session: InterestProfile | null;
   /** Signed cosine affinity between the effective profile and the project. */
   contentAffinity: number;
-  /** Cosine affinity between the session profile and the project (null when no session profile). */
+  /** Signed cosine affinity between the session profile and the project (null when no meaningful session). */
   sessionAffinity: number | null;
+  /** Session confidence in [0, 1] (omitted/0 = no meaningful session → no session wording). */
+  sessionConfidence?: number;
   popularityScore: number;
   sources: readonly CandidateSource[];
   /** True when the profile is onboarding-only (no weighted interactions yet). */
@@ -158,14 +163,22 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
     factors.push({ kind: input.coldStart ? "onboarding" : "taste", features: tasteFeatures, strength: input.contentAffinity });
   }
 
+  // Session: a meaningful current session (confidence ≥ threshold), positive affinity and
+  // positive session signal on the project's own tags — dislike-driven signal never qualifies.
+  const sessionConfidence = input.sessionConfidence ?? 0;
   const sessionTags = positiveTagOverlap(session, project.tagSlugs, config.maxFeaturesPerSentence);
+  const sessionScore = input.sessionAffinity !== null ? Math.max(0, input.sessionAffinity) : 0;
   const sessionSupported =
-    sessionTags.length > 0 && input.sessionAffinity !== null && input.sessionAffinity >= config.minSessionAffinity;
+    session !== null &&
+    sessionConfidence >= config.minSessionConfidence &&
+    sessionTags.length > 0 &&
+    input.sessionAffinity !== null &&
+    sessionScore >= config.minSessionAffinity;
   if (sessionSupported) {
     factors.push({
       kind: "session",
       features: sessionTags.map((t) => ({ id: featureId("tag", t.slug), label: labelFor("tag", t.slug) })),
-      strength: input.sessionAffinity ?? 0,
+      strength: sessionScore,
     });
   }
 
@@ -246,11 +259,20 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
     }
   }
 
-  // Fixed precedence: collaborative / novelty (when they dominate) → taste/onboarding → session → fit → popularity → catalog.
+  // Session leads when it is the strongest honest reason: no long-term taste match at all, or a
+  // strong session (confidence ≥ strongSessionConfidence) whose affinity beats the effective content
+  // affinity — the project is here mainly because of what the user is doing right now.
+  const sessionLeads =
+    sessionSupported &&
+    (!tasteSupported || (sessionConfidence >= config.strongSessionConfidence && sessionScore >= Math.max(0, input.contentAffinity)));
+
+  // Fixed precedence: collaborative / novelty (when they dominate) → session (when it leads)
+  // → taste/onboarding (+ session secondary) → session → fit → popularity → catalog.
   const tagProse = joinNatural(tasteFeatures.map((f) => proseLabel(f.label)));
   const sessionProse = joinNatural(sessionTags.map((t) => proseLabel(labelFor("tag", t.slug))));
   const fitSentence = `Fits your preference for ${fitParts.join(" ")} projects.`;
   const collaborativeText = collaborativeSupported ? collaborativeSentence(seeds) : "";
+  const sessionSecondary = `You've also been exploring ${sessionProse} this session.`;
 
   let text: string;
   let primary: ExplanationFactorKind;
@@ -258,6 +280,7 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
     primary = "collaborative";
     text = collaborativeText;
     if (tasteSupported) text += ` It also matches your interest in ${tagProse}.`;
+    else if (sessionSupported) text += ` ${sessionSecondary}`;
     else if (noveltySupported) text += ` ${noveltyText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
   } else if (noveltyLeads) {
@@ -265,21 +288,26 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
     text = noveltyText;
     if (tasteSupported && !noveltyText.includes("interest")) text += ` It matches your interest in ${tagProse}.`;
     else if (collaborativeSupported) text += ` ${collaborativeText}`;
+  } else if (sessionLeads) {
+    primary = "session";
+    text = tasteSupported
+      ? `Your current session has shifted towards ${sessionProse}, while this still matches your broader ${tagProse} interests.`
+      : `You've been exploring ${sessionProse} projects in this session.`;
+    if (!tasteSupported && collaborativeSupported) text += ` ${collaborativeText}`;
+    else if (!tasteSupported && fitSupported) text += ` ${fitSentence}`;
   } else if (tasteSupported && input.coldStart) {
     primary = "onboarding";
     text = `Based on the interests you selected during onboarding: ${tagProse}.`;
-    if (noveltySupported && input.sources.includes("exploration")) text += ` ${noveltyText}`;
+    if (sessionSupported) text += ` ${sessionSecondary}`;
+    else if (noveltySupported && input.sources.includes("exploration")) text += ` ${noveltyText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
   } else if (tasteSupported) {
     primary = "taste";
     text = `Because you like ${tagProse} projects.`;
-    if (sessionSupported) text += ` You've also been exploring ${sessionProse} this session.`;
+    if (sessionSupported) text += ` ${sessionSecondary}`;
     else if (collaborativeSupported) text += ` ${collaborativeText}`;
     else if (noveltySupported && input.sources.includes("exploration")) text += ` ${noveltyText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
-  } else if (sessionSupported) {
-    primary = "session";
-    text = `You recently explored ${sessionProse} projects in this session.`;
   } else if (fitSupported) {
     primary = "fit";
     text = fitSentence;

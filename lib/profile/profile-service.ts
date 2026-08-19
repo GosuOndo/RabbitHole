@@ -27,6 +27,7 @@ import {
   type OnboardingSignals,
   type ProfileInteraction,
 } from "@/lib/recommender/profile";
+import { computeSessionConfidence, sessionTopFeatures } from "@/lib/recommender/session";
 import type { FeatureVector } from "@/lib/recommender/types";
 import { sessionService, type SessionRecord } from "@/lib/sessions";
 
@@ -77,14 +78,31 @@ export interface SessionView {
   interactionCount: number;
 }
 
+/** Adaptive session influence derived from the current-session profile (Phase 6). */
+export interface SessionFocusView {
+  /** True when the session carries meaningful (non-zero-weight) evidence. */
+  available: boolean;
+  meaningfulInteractions: number;
+  evidence: number;
+  evidenceConfidence: number;
+  coherence: number;
+  confidence: number;
+  /** Share of the effective profile taken by the session (≤ session.maxBlendWeight). */
+  blendWeight: number;
+  /** Strongest positive session tags. */
+  topFeatures: { id: string; key: string; label: string; strength: number }[];
+}
+
 export interface UserProfileSnapshot {
   user: { id: string; name: string; explorationPreference: number; onboardingCompleted: boolean };
   onboarding: OnboardingStateView;
   session: SessionView | null;
+  /** Long-term = onboarding prior + earlier sessions; the active session is reported separately. */
   longTermProfile: InterestProfileView;
   sessionProfile: InterestProfileView;
+  sessionFocus: SessionFocusView;
   stats: ProfileStats;
-  config: { halfLifeDays: number; historyWindowDays: number; sessionTimeoutMinutes: number };
+  config: { halfLifeDays: number; historyWindowDays: number; sessionTimeoutMinutes: number; maxSessionBlendWeight: number };
   computedAt: string;
 }
 
@@ -96,8 +114,12 @@ export interface UserProfileData {
   interactions: { projectId: string; sessionId: string; type: InteractionType; createdAt: Date }[];
   onboarding: OnboardingStateView;
   activeSession: SessionRecord | null;
+  /** Historical taste: onboarding prior + decayed behaviour from earlier sessions (the active session is excluded). */
   longTerm: InterestProfile;
+  /** Current-session behaviour only (no decay, no onboarding); empty when no session is active. */
   session: InterestProfile;
+  /** The active session's interactions (with project ids) — input for session evidence/confidence. */
+  sessionInteractions: ProfileInteraction[];
   /** Per-project behavioural state derived from the full history. */
   states: Map<string, ProjectState>;
   labels: LabelMaps;
@@ -207,10 +229,13 @@ export async function loadUserProfileData(userId: string, now: Date = new Date()
   const windowStart = now.getTime() - RECOMMENDER_CONFIG.timeDecay.historyWindowDays * MS_PER_DAY;
   const toProfileInteraction = (i: (typeof interactions)[number]): ProfileInteraction | null => {
     const projectFeatures = features.get(i.projectId);
-    return projectFeatures ? { type: i.type, createdAt: i.createdAt, sessionId: i.sessionId, features: projectFeatures } : null;
+    return projectFeatures ? { type: i.type, createdAt: i.createdAt, sessionId: i.sessionId, projectId: i.projectId, features: projectFeatures } : null;
   };
+  // Long-term = earlier sessions only: while a session is active its interactions feed the
+  // session profile and are *not* counted in the long-term profile as well (no double counting).
+  // Once the session ends they become history through the same decay rules as everything else.
   const historical = interactions
-    .filter((i) => i.createdAt.getTime() >= windowStart)
+    .filter((i) => i.createdAt.getTime() >= windowStart && (activeSession === null || i.sessionId !== activeSession.id))
     .map(toProfileInteraction)
     .filter((i): i is ProfileInteraction => i !== null);
   const sessionInteractions = activeSession
@@ -244,6 +269,7 @@ export async function loadUserProfileData(userId: string, now: Date = new Date()
     activeSession,
     longTerm: buildLongTermProfile({ interactions: historical, onboarding: onboardingSignals, now }),
     session: buildSessionProfile({ interactions: sessionInteractions, now }),
+    sessionInteractions,
     states: deriveProjectStates(interactions),
     labels,
   };
@@ -282,11 +308,16 @@ export async function getUserProfileSnapshot(userId: string, now: Date = new Dat
       : null,
     longTermProfile: toProfileView(data.longTerm, labels),
     sessionProfile: toProfileView(data.session, labels),
+    sessionFocus: {
+      ...computeSessionConfidence(data.sessionInteractions, data.session),
+      topFeatures: sessionTopFeatures(data.session).map((f) => ({ id: f.id, key: f.key, label: labelForFeature("tag", f.key, labels), strength: f.strength })),
+    },
     stats,
     config: {
       halfLifeDays: RECOMMENDER_CONFIG.timeDecay.halfLifeDays,
       historyWindowDays: RECOMMENDER_CONFIG.timeDecay.historyWindowDays,
       sessionTimeoutMinutes: sessionService.timeoutMinutes,
+      maxSessionBlendWeight: RECOMMENDER_CONFIG.session.maxBlendWeight,
     },
     computedAt: now.toISOString(),
   };

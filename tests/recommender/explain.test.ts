@@ -74,15 +74,90 @@ describe("explainRecommendation", () => {
     expect(onboardingOnly.text).toContain("Fits your preference for weekend-sized intermediate projects.");
   });
 
-  it("surfaces session exploration when the session profile overlaps", () => {
-    const project = projectBySlug("webgl-fluid-simulation");
-    const session = buildSessionProfile({ interactions: interactionsOn([{ slug: "implement-a-ray-tracer", type: "OPEN" }, { slug: "live-shader-playground", type: "SAVE" }]), now: NOW });
-    const sessionAffinity = cosineSimilarity(session.vector, project.vector);
-    const longTerm = onboardingProfile(["systems"]);
-    const result = explainRecommendation(baseInput({ project, longTerm, session, sessionAffinity, contentAffinity: 0.3, sources: ["content"] }));
-    expect(result.primary).toBe("session");
-    expect(result.text).toMatch(/^You recently explored .* projects in this session\./);
-    expect(result.factors.find((f) => f.kind === "session")!.features.length).toBeGreaterThan(0);
+  describe("session wording (Phase 6)", () => {
+    const graphicsProject = projectBySlug("webgl-fluid-simulation");
+    const session = buildSessionProfile({
+      interactions: interactionsOn([
+        { slug: "implement-a-ray-tracer", type: "OPEN" },
+        { slug: "live-shader-playground", type: "SAVE" },
+        { slug: "procedural-terrain-generator", type: "SAVE" },
+      ]),
+      now: NOW,
+    });
+    const affinity = (project: ReturnType<typeof projectBySlug>, profile = session) => cosineSimilarity(profile.vector, project.vector);
+    const systemsLongTerm = onboardingProfile(["systems"]);
+
+    it("a meaningful session leads when long-term taste does not explain the project", () => {
+      const result = explainRecommendation(
+        baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session, sessionAffinity: affinity(graphicsProject), sessionConfidence: 0.5, contentAffinity: 0.3, sources: ["content"] }),
+      );
+      expect(result.primary).toBe("session");
+      expect(result.text).toMatch(/^You've been exploring .* projects in this session\./);
+      expect(result.factors.find((f) => f.kind === "session")!.features.map((f) => f.id)).toContain("tag:graphics");
+    });
+
+    it("a strong session that beats the content affinity leads with the 'shifted towards' wording while naming the broader taste", () => {
+      const project = projectBySlug("software-rasterizer"); // graphics + systems-ish tags
+      const longTerm = onboardingProfile(["systems", "graphics"]);
+      const result = explainRecommendation(
+        baseInput({ project, longTerm, session, sessionAffinity: 0.8, sessionConfidence: 0.7, contentAffinity: 0.45, sources: ["content"] }),
+      );
+      expect(result.primary).toBe("session");
+      expect(result.text).toMatch(/^Your current session has shifted towards .*, while this still matches your broader .* interests\./);
+    });
+
+    it("stays secondary when long-term taste leads and the session is not strong", () => {
+      const project = projectBySlug("software-rasterizer");
+      const longTerm = onboardingProfile(["systems", "graphics"]);
+      const result = explainRecommendation(
+        baseInput({ project, longTerm, session, sessionAffinity: 0.6, sessionConfidence: 0.3, contentAffinity: 0.7, sources: ["content"] }),
+      );
+      expect(result.primary).toBe("taste");
+      expect(result.text).toMatch(/^Because you like .* projects\. You've also been exploring .* this session\./);
+    });
+
+    it("one impression / a weak session (low confidence) never produces session wording", () => {
+      const impressionOnly = buildSessionProfile({ interactions: interactionsOn([{ slug: "implement-a-ray-tracer", type: "IMPRESSION" }]), now: NOW });
+      const fromImpression = explainRecommendation(
+        baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session: impressionOnly, sessionAffinity: null, sessionConfidence: 0, contentAffinity: 0.1, sources: ["content"] }),
+      );
+      expect(fromImpression.text).not.toMatch(/session/);
+      const weak = explainRecommendation(
+        baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session, sessionAffinity: affinity(graphicsProject), sessionConfidence: 0.09, contentAffinity: 0.1, sources: ["content"] }),
+      );
+      expect(weak.text).not.toMatch(/session/);
+      expect(weak.factors.some((f) => f.kind === "session")).toBe(false);
+    });
+
+    it("negative session affinity or dislike-driven session signal never produces positive session wording", () => {
+      const disliking = buildSessionProfile({
+        interactions: interactionsOn([{ slug: "webgl-fluid-simulation", type: "DISLIKE" }, { slug: "live-shader-playground", type: "DISLIKE" }]),
+        now: NOW,
+      });
+      const negative = explainRecommendation(
+        baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session: disliking, sessionAffinity: affinity(graphicsProject, disliking), sessionConfidence: 0.6, contentAffinity: 0.1, sources: ["content"] }),
+      );
+      expect(affinity(graphicsProject, disliking)).toBeLessThan(0);
+      expect(negative.text).not.toMatch(/exploring|session/);
+      expect(negative.factors.some((f) => f.kind === "session")).toBe(false);
+      // Positive affinity but below the threshold: no claim either.
+      const faint = explainRecommendation(
+        baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session, sessionAffinity: 0.1, sessionConfidence: 0.6, contentAffinity: 0.1, sources: ["content"] }),
+      );
+      expect(faint.text).not.toMatch(/session/);
+    });
+
+    it("keeps long-term, collaborative, novelty and onboarding wording intact alongside sessions, deterministically", () => {
+      const longTermOnly = explainRecommendation(baseInput({ sessionConfidence: 0 }));
+      expect(longTermOnly.primary).toBe("taste");
+      const onboarding = explainRecommendation(
+        baseInput({ coldStart: true, session, sessionAffinity: 0.05, sessionConfidence: 0.5 }),
+      );
+      expect(onboarding.primary).toBe("onboarding");
+      expect(onboarding.text).not.toMatch(/session/);
+      const input = baseInput({ project: graphicsProject, longTerm: systemsLongTerm, session, sessionAffinity: affinity(graphicsProject), sessionConfidence: 0.5, contentAffinity: 0.3, sources: ["content"] });
+      expect(explainRecommendation(input)).toEqual(explainRecommendation(input));
+    });
   });
 
   it("falls back to a neutral catalog sentence when nothing supports a claim", () => {

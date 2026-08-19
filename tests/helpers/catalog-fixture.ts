@@ -65,6 +65,7 @@ export function interactionsOn(entries: { slug: string; type: ProfileInteraction
     type: e.type,
     createdAt: new Date(NOW.getTime() - (e.daysAgo ?? 0) * 86_400_000),
     sessionId: e.sessionId ?? "s1",
+    projectId: e.slug,
     features: projectBySlug(e.slug).vector,
   }));
 }
@@ -75,10 +76,18 @@ export function behaviourProfile(interactions: ProfileInteraction[], onboarding:
 
 export const emptySession = buildSessionProfile({ interactions: [], now: NOW });
 
+/** A current-session profile plus its interactions (the pair the pipeline needs). */
+export function sessionOf(entries: Parameters<typeof interactionsOn>[0], sessionId = "current"): Pick<RecommendationProfileInput, "session" | "sessionInteractions" | "sessionId"> {
+  const sessionInteractions = interactionsOn(entries.map((e) => ({ ...e, sessionId })));
+  return { session: buildSessionProfile({ interactions: sessionInteractions, now: NOW }), sessionInteractions, sessionId };
+}
+
 export function profileInput(longTerm: InterestProfile, extra: Partial<RecommendationProfileInput> = {}): RecommendationProfileInput {
   return {
     longTerm,
     session: extra.session ?? emptySession,
+    sessionInteractions: extra.sessionInteractions ?? [],
+    sessionId: extra.sessionId ?? null,
     excludedProjectIds: extra.excludedProjectIds ?? new Set(),
     savedProjectIds: extra.savedProjectIds ?? new Set(),
     // Tests default to Familiar so Phase 3/4 expectations about ordering stay meaningful.

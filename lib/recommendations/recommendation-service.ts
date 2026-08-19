@@ -24,7 +24,7 @@ import {
   type RecommendationContext,
   type RecommenderDeps,
 } from "@/lib/recommender/recommend";
-import { blendProfiles } from "@/lib/recommender/session";
+import { blendProfiles, computeSessionConfidence, sessionAffinityFor, type SessionAffinity } from "@/lib/recommender/session";
 import { cosineSimilarity } from "@/lib/recommender/similarity";
 import { similarProjects } from "@/lib/recommender/similar";
 import type { CandidateSource, PipelineStats, RankingWeights, ScoreBreakdown } from "@/lib/recommender/types";
@@ -56,6 +56,8 @@ export interface RecommendationView {
   /** Exploration retrieval diagnostics (null unless the exploration source retrieved it). */
   exploration: ExplorationDiagnostics | null;
   diversification: DiversificationItemDiagnostics;
+  /** Raw + ranking session affinity (null when no meaningful session exists). */
+  session: SessionAffinity | null;
   project: ProjectSummary;
 }
 
@@ -117,6 +119,7 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
           novelty: item.novelty,
           exploration: item.exploration,
           diversification: item.diversification,
+          session: item.session,
           project: toProjectSummary(project),
         },
       ];
@@ -149,6 +152,9 @@ export interface ProjectRecommendationContext {
   explanation: Explanation;
   collaborative: CollaborativeItemDiagnostics | null;
   novelty: NoveltyBreakdown;
+  /** Session affinity (null when no meaningful session exists). */
+  session: SessionAffinity | null;
+  sessionConfidence: number;
   explorationPreference: number;
   coldStart: boolean;
   excludedFromDiscovery: boolean;
@@ -169,14 +175,16 @@ export async function getProjectRecommendationContext(userId: string, projectId:
   ]);
   const project = catalog.find((item) => item.id === projectId);
   if (!project) return null;
-  const effective = blendProfiles(profile.longTerm, profile.session);
+  const sessionConfidence = computeSessionConfidence(profile.sessionInteractions, profile.session);
+  const effective = blendProfiles(profile.longTerm, profile.session, sessionConfidence.blendWeight);
   const profileEmpty = Object.keys(effective.vector).length === 0;
   if (profileEmpty) return null;
   const projectById = new Map(catalog.map((item) => [item.id, item]));
 
-  const coldStart = profile.longTerm.interactionCount < RECOMMENDER_CONFIG.coldStart.maxInteractions;
+  const coldStart = profile.longTerm.interactionCount + profile.session.interactionCount < RECOMMENDER_CONFIG.coldStart.maxInteractions;
   const popularity = computePopularityScores(catalog, popularityEvidence).get(project.id);
   const contentAffinity = cosineSimilarity(effective.vector, project.vector);
+  const sessionAffinity = sessionAffinityFor(sessionConfidence.available ? profile.session : null, project.vector, sessionConfidence.available);
 
   // Collaborative evidence for this project from the same model the feed uses.
   const model = buildCollaborativeModel(interactions, { excludeUserId: userId });
@@ -189,7 +197,10 @@ export async function getProjectRecommendationContext(userId: string, projectId:
   const novelty = computeNovelty({ popularityScore: popularity?.score ?? 0, contentAffinity });
   const sources: CandidateSource[] = evidence ? ["content", "collaborative"] : ["content"];
   const explorationPreference = profile.explorationPreference;
-  const weights = resolveRankingWeights(resolveAvailableComponents({ profileEmpty, collaborativeAvailable }), { coldStart, explorationPreference });
+  const weights = resolveRankingWeights(
+    resolveAvailableComponents({ profileEmpty, collaborativeAvailable, sessionAvailable: sessionConfidence.available }),
+    { coldStart, explorationPreference, sessionConfidence: sessionConfidence.confidence },
+  );
   const [ranked] = rankCandidates(
     [
       {
@@ -200,6 +211,7 @@ export async function getProjectRecommendationContext(userId: string, projectId:
         signals: {
           content: contentAffinity,
           ...(evidence ? { collaborative: evidence.score } : {}),
+          ...(sessionAffinity ? { session: sessionAffinity.score } : {}),
           novelty: novelty.novelty,
           popularity: popularity?.score ?? 0,
         },
@@ -212,9 +224,10 @@ export async function getProjectRecommendationContext(userId: string, projectId:
   const explanation = explainRecommendation({
     project,
     longTerm: profile.longTerm,
-    session: profile.session.norm > 0 ? profile.session : null,
+    session: sessionConfidence.available ? profile.session : null,
     contentAffinity,
-    sessionAffinity: profile.session.norm > 0 ? cosineSimilarity(profile.session.vector, project.vector) : null,
+    sessionAffinity: sessionAffinity?.raw ?? null,
+    sessionConfidence: sessionConfidence.confidence,
     popularityScore: popularity?.score ?? 0,
     sources,
     coldStart: profile.longTerm.interactionCount === 0,
@@ -233,6 +246,8 @@ export async function getProjectRecommendationContext(userId: string, projectId:
     explanation,
     collaborative: evidence ? { score: evidence.score, rawEvidence: evidence.rawEvidence, confidence: scoring.confidence, seeds: seedViews } : null,
     novelty,
+    session: sessionAffinity,
+    sessionConfidence: sessionConfidence.confidence,
     explorationPreference,
     coldStart,
     excludedFromDiscovery: profile.excludedProjectIds.has(project.id),

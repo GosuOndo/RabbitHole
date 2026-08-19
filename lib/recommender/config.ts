@@ -80,20 +80,32 @@ export const RECOMMENDER_CONFIG = {
     durationSignal: 1.0,
   },
 
-  /** Session handling and long-term/session profile blending. */
+  /**
+   * Session handling and adaptive long-term/session blending (Phase 6).
+   *
+   *   evidence           = Σ |interactionWeight| over the session's meaningful interactions
+   *                        (zero-weight impressions ignored; each (project, type) pair counted once)
+   *   evidenceConfidence = evidence / (evidence + evidenceHalfSaturation)
+   *   coherence          = Σ top-K |tag signals| / Σ all |tag signals|         (session profile, K = coherenceTopFeatures)
+   *   confidence         = evidenceConfidence × (coherenceFloor + (1 − coherenceFloor) × coherence)
+   *   blendWeight        = maxBlendWeight × confidence
+   *   effectiveProfile   = normalise((1 − blendWeight) × longTerm + blendWeight × session)
+   *
+   * The session ranking component's raw weight is rankingWeights.session × confidence.
+   */
   session: {
     /** A new session starts after this much inactivity. */
     timeoutMinutes: 30,
-    /**
-     * effectiveProfile = (1 - w) * longTerm + w * session, where
-     * w = min(maxWeight, baseWeight * min(1, n / fullWeightInteractionCount) + coherenceBonus * coherence).
-     * `n` is the number of session interactions and `coherence` in [0, 1]
-     * measures how focused the session is on a theme.
-     */
-    baseWeight: 0.25,
-    fullWeightInteractionCount: 5,
-    coherenceBonus: 0.1,
-    maxWeight: 0.4,
+    /** Evidence at which evidenceConfidence reaches 0.5 (≈ two SAVEs, or one BUILD). */
+    evidenceHalfSaturation: 4,
+    /** Number of strongest tag features whose share of the session's tag mass defines coherence. */
+    coherenceTopFeatures: 3,
+    /** Share of confidence granted even to a completely diffuse session (evidence is still required). */
+    coherenceFloor: 0.5,
+    /** Upper bound of the session's share of the effective profile — long-term taste always keeps the majority. */
+    maxBlendWeight: 0.45,
+    /** Positive session features exposed in diagnostics / the "This session" indicator. */
+    topFeatureCount: 5,
   },
 
   /** How many candidates each retrieval strategy contributes. */
@@ -155,8 +167,12 @@ export const RECOMMENDER_CONFIG = {
   explanation: {
     /** Content affinity needed before "because you like…" is claimed. */
     minContentAffinity: 0.2,
-    /** Session affinity needed before "you recently explored…" is claimed. */
+    /** Session affinity (cosine with the session profile) needed before "you've been exploring…" is claimed. */
     minSessionAffinity: 0.25,
+    /** Session confidence needed before any session wording appears (one weak OPEN stays below it). */
+    minSessionConfidence: 0.15,
+    /** Session confidence at which session wording may lead even when long-term taste also matches. */
+    strongSessionConfidence: 0.4,
     /** Popularity score needed before "popular with RabbitHole users" is claimed. */
     minPopularity: 0.5,
     /** Collaborative score needed before "people who liked … also liked this" is claimed. */
@@ -179,7 +195,9 @@ export const RECOMMENDER_CONFIG = {
    * Base ranking weights at exploration preference 0 (Familiar). Per request
    * they are shifted by `exploration.weightSlopes × preference`, clamped at 0
    * and renormalised over the components available for the user, so they do
-   * not need to sum to 1 here (`session` is unused until Phase 6).
+   * not need to sum to 1 here. `session` is the *maximum* raw session weight:
+   * the effective raw weight is `session × sessionConfidence` (0 without a
+   * meaningful session, approaching 0.10 for a strong coherent one).
    *   score = Σ weight[c] * normalisedScore[c]
    */
   rankingWeights: {

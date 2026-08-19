@@ -1,20 +1,22 @@
 /**
  * Recommendation orchestration.
  *
- *   profile (long-term + session) ──▶ effective profile vector          explorationPreference e ∈ [0, 1]
- *          │
- *          ├─▶ content candidates        (cosine affinity, ~50)
+ *   long-term profile + current-session profile ──▶ session confidence ──▶ adaptive effective profile
+ *          │                                                                 explorationPreference e ∈ [0, 1]
+ *          ├─▶ content candidates        (cosine affinity with the effective profile, ~50)
  *          ├─▶ collaborative candidates  (item-item neighbours of the user's positive projects, ~30)
  *          ├─▶ popularity candidates     (seed prior + behaviour, ~15)
  *          └─▶ exploration candidates    (plausible + novel, ~8–15 growing with e)
  *                     │
- *              merge (keep all sources) ─▶ filter (terminal states) ─▶ novelty + signals
- *                     ─▶ exploration-aware hybrid rank ─▶ diversify (MMR) ─▶ final top-K ─▶ explain
+ *              merge (keep all sources) ─▶ filter (terminal states) ─▶ novelty + session affinity + signals
+ *                     ─▶ hybrid rank (content · collaborative · session · novelty · popularity)
+ *                     ─▶ diversify (MMR) ─▶ final top-K ─▶ explain
  *
  * `runRecommendationPipeline` is pure (fixtures in, recommendations out) so
  * the whole lifecycle is unit-testable; `recommendForUser` only loads data
- * through injected loaders and calls it. Session-aware re-ranking (Phase 6)
- * slots in as another ranking component without changing this shape.
+ * through injected loaders and calls it. The session is not a candidate
+ * source: it steers retrieval through the effective profile and ranking
+ * through the confidence-weighted session component.
  */
 
 import { countBySource, filterCandidates, mergeCandidateSets } from "./candidates";
@@ -35,10 +37,16 @@ import { retrieveExplorationCandidates, type ExplorationDiagnostics } from "./ex
 import type { FeatureFamily } from "./features";
 import { computeNovelty, type NoveltyBreakdown } from "./novelty";
 import { computePopularityScores, retrievePopularityCandidates } from "./popularity";
-import type { InterestProfile } from "./profile";
+import type { InterestProfile, ProfileInteraction } from "./profile";
 import { rankCandidates, resolveRankingWeights, type RankedCandidate, type RankingInput } from "./rank";
-import { blendProfiles } from "./session";
-import { cosineSimilarity } from "./similarity";
+import {
+  blendProfiles,
+  computeSessionConfidence,
+  sessionAffinityFor,
+  sessionTopFeatures,
+  type SessionAffinity,
+  type SessionConfidence,
+} from "./session";
 import type {
   CandidateSource,
   CollaborativeInteraction,
@@ -49,13 +57,19 @@ import type {
   ScoreComponent,
 } from "./types";
 
-export const RECOMMENDER_ALGORITHM = "hybrid-explore-v1";
+export const RECOMMENDER_ALGORITHM = "hybrid-session-v1";
 
 export type LabelResolver = (family: FeatureFamily, key: string) => string;
 
 export interface RecommendationProfileInput {
+  /** Historical taste: onboarding prior + behaviour from earlier sessions (the active session is excluded while it runs). */
   longTerm: InterestProfile;
+  /** Current-session behaviour only (signed, L2-normalised); empty when no session is active. */
   session: InterestProfile;
+  /** The active session's interactions (with project ids) — the input of session evidence/confidence. */
+  sessionInteractions: readonly ProfileInteraction[];
+  /** Active session id for diagnostics, or null. */
+  sessionId: string | null;
   /** Projects in terminal states (DISLIKE / BUILD / COMPLETE) — never shown. */
   excludedProjectIds: ReadonlySet<string>;
   /** Currently saved projects — eligible but demoted. */
@@ -123,6 +137,8 @@ export interface RecommendationItem {
   /** Present when the exploration source retrieved this project. */
   exploration: ExplorationDiagnostics | null;
   diversification: DiversificationItemDiagnostics;
+  /** Raw (signed) and ranking (clamped) session affinity; null when no meaningful session exists. */
+  session: SessionAffinity | null;
 }
 
 export interface CollaborativeContext {
@@ -153,12 +169,29 @@ export interface DiversificationContext {
   relaxationLevel: number;
 }
 
+export interface SessionTopFeatureView {
+  id: string;
+  family: "tag";
+  key: string;
+  label: string;
+  /** Relative to the strongest positive session tag, in (0, 1]. */
+  strength: number;
+}
+
+/** Current-session diagnostics (no raw vectors — only the few strongest positive features). */
+export interface SessionContext extends SessionConfidence {
+  sessionId: string | null;
+  /** Strongest positive session tags, for the "This session" indicator. */
+  topFeatures: SessionTopFeatureView[];
+}
+
 export interface RecommendationContext {
   coldStart: boolean;
   profileEmpty: boolean;
+  /** Non-zero-weight interactions behind the profiles (historical + current session). */
   weightedInteractionCount: number;
   includesOnboarding: boolean;
-  sessionWeight: number;
+  session: SessionContext;
   collaborative: CollaborativeContext;
   exploration: ExplorationContext;
   diversification: DiversificationContext;
@@ -174,10 +207,11 @@ export interface RecommendationPipelineOutput {
 }
 
 /** Which ranking components exist for this user (weights are renormalised over them). */
-export function resolveAvailableComponents(flags: { profileEmpty: boolean; collaborativeAvailable: boolean }): ScoreComponent[] {
+export function resolveAvailableComponents(flags: { profileEmpty: boolean; collaborativeAvailable: boolean; sessionAvailable?: boolean }): ScoreComponent[] {
   const components: ScoreComponent[] = [];
   if (!flags.profileEmpty) components.push("content");
   if (flags.collaborativeAvailable) components.push("collaborative");
+  if (flags.sessionAvailable) components.push("session");
   components.push("novelty", "popularity");
   return components;
 }
@@ -214,13 +248,20 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     Math.min(RECOMMENDER_CONFIG.exploration.maxPreference, Number.isFinite(profile.explorationPreference) ? profile.explorationPreference : RECOMMENDER_CONFIG.exploration.defaultPreference),
   );
 
-  // 1. Effective profile: long-term taste with a modest, fixed session blend.
-  const effective = blendProfiles(profile.longTerm, profile.session);
-  const coldStart = profile.longTerm.interactionCount < RECOMMENDER_CONFIG.coldStart.maxInteractions;
+  // 1. Session confidence → adaptive effective profile (long-term taste steered, never replaced, by the session).
+  const sessionConfidence = computeSessionConfidence(profile.sessionInteractions, profile.session);
+  const effective = blendProfiles(profile.longTerm, profile.session, sessionConfidence.blendWeight);
+  const sessionAvailable = sessionConfidence.available;
+  const sessionProfile = sessionAvailable ? profile.session : null;
+  const behaviouralInteractions = profile.longTerm.interactionCount + profile.session.interactionCount;
+  const coldStart = behaviouralInteractions < RECOMMENDER_CONFIG.coldStart.maxInteractions;
   const profileEmpty = Object.keys(effective.vector).length === 0;
 
   // 2. Per-project signals shared by retrieval and ranking.
   const contentAffinity = scoreContentAffinity(effective.vector, catalog);
+  const sessionAffinityByProject = new Map<string, SessionAffinity | null>(
+    catalog.map((project) => [project.id, sessionAffinityFor(sessionProfile, project.vector, sessionAvailable)]),
+  );
   const popularityScores = computePopularityScores(catalog, input.popularityEvidence);
   const collaborativeModel = buildCollaborativeModel(input.interactions, { excludeUserId: input.userId });
   const seeds = collaborativeSeedsForUser(input.interactions, input.userId);
@@ -260,12 +301,14 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     knownProjectIds: new Set(projectById.keys()),
   });
 
-  // 5. Ranking signals for every surviving candidate (absent evidence stays absent; novelty always exists).
+  // 5. Ranking signals for every surviving candidate (absent evidence stays absent; novelty always exists;
+  //    session affinity is a real 0 for non-matching projects once a meaningful session exists, null otherwise).
   const rankingInputs: RankingInput[] = kept.map((candidate) => {
     const project = projectById.get(candidate.projectId)!;
     const collaborative = collaborativeScoring.scores.get(project.id);
     const popularity = popularityScores.get(project.id);
     const novelty = noveltyByProject.get(project.id)!;
+    const sessionAffinity = sessionAffinityByProject.get(project.id) ?? null;
     return {
       projectId: project.id,
       slug: project.slug,
@@ -274,6 +317,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       signals: {
         ...(profileEmpty ? {} : { content: contentAffinity.get(project.id) ?? 0 }),
         ...(collaborative ? { collaborative: collaborative.score } : {}),
+        ...(sessionAffinity ? { session: sessionAffinity.score } : {}),
         novelty: novelty.novelty,
         popularity: popularity?.score ?? 0,
       },
@@ -281,6 +325,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       rawSignals: {
         ...candidate.signals,
         contentAffinity: contentAffinity.get(project.id) ?? 0,
+        sessionAffinity: sessionAffinity?.raw ?? 0,
         popularityPrior: popularity?.prior ?? 0,
         popularityBehavioral: popularity?.behavioral ?? 0,
         collaborativeEvidence: collaborative?.rawEvidence ?? 0,
@@ -292,9 +337,9 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     };
   });
 
-  // 6. Exploration-aware hybrid rank with weights renormalised over the components this user has.
-  const components = resolveAvailableComponents({ profileEmpty, collaborativeAvailable });
-  const weights = resolveRankingWeights(components, { coldStart, explorationPreference });
+  // 6. Hybrid rank: exploration-aware weights, session weight scaled by confidence, renormalised over available components.
+  const components = resolveAvailableComponents({ profileEmpty, collaborativeAvailable, sessionAvailable });
+  const weights = resolveRankingWeights(components, { coldStart, explorationPreference, sessionConfidence: sessionConfidence.confidence });
   const ranked = rankCandidates(rankingInputs, { weights });
 
   // 7. Diversify (MMR + tag concentration) and take the final top-K.
@@ -308,7 +353,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
   const items: RecommendationItem[] = diversified.selected.map((entry) => {
     const r = entry.item;
     const project = projectById.get(r.projectId)!;
-    const sessionAffinity = profile.session.norm > 0 ? cosineSimilarity(profile.session.vector, project.vector) : null;
+    const sessionAffinity = sessionAffinityByProject.get(r.projectId) ?? null;
     const evidence = collaborativeScoring.scores.get(r.projectId) ?? null;
     const seedViews = describeSupportingSeeds(collaborativeScoring, r.projectId, projectById);
     const seedReferences: CollaborativeSeedReference[] = seedViews.map((s) => ({
@@ -321,9 +366,10 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     const explanation = explainRecommendation({
       project,
       longTerm: profile.longTerm,
-      session: profile.session.norm > 0 ? profile.session : null,
+      session: sessionProfile,
       contentAffinity: r.breakdown.content ?? 0,
-      sessionAffinity,
+      sessionAffinity: sessionAffinity?.raw ?? null,
+      sessionConfidence: sessionConfidence.confidence,
       popularityScore: r.breakdown.popularity ?? 0,
       sources: r.sources,
       coldStart: profile.longTerm.interactionCount === 0,
@@ -356,6 +402,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
         maxSimilarityToSelected: entry.maxSimilarityToSelected,
         admittedUnderRelaxation: entry.admittedUnderRelaxation,
       },
+      session: sessionAffinity,
     };
   });
 
@@ -379,9 +426,16 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     context: {
       coldStart,
       profileEmpty,
-      weightedInteractionCount: profile.longTerm.interactionCount,
+      weightedInteractionCount: behaviouralInteractions,
       includesOnboarding: profile.longTerm.includesOnboarding,
-      sessionWeight: effective.sessionWeight,
+      session: {
+        ...sessionConfidence,
+        blendWeight: effective.sessionWeight,
+        sessionId: profile.sessionId,
+        topFeatures: sessionAvailable
+          ? sessionTopFeatures(profile.session).map((f) => ({ ...f, label: labelFor("tag", f.key) }))
+          : [],
+      },
       collaborative: {
         available: collaborativeAvailable,
         seedCount: seeds.length,

@@ -5,11 +5,12 @@
  *   score *= savedProjectScoreMultiplier                    when the project is already saved
  *
  * Weights come from RECOMMENDER_CONFIG.rankingWeights restricted to the
- * components that actually exist for this user/pipeline (content and popularity
- * always; collaborative when the user has behavioural seeds; session/novelty
- * are added by later phases) and renormalised to sum to 1. For cold-start
- * users the popularity weight is boosted before renormalisation so a thin
- * profile does not over-fit.
+ * components that actually exist for this user/pipeline (novelty and popularity
+ * always; content when the profile has signal; collaborative when the user has
+ * behavioural seeds; session when the current session carries meaningful
+ * evidence — its raw weight scales with the session confidence) and
+ * renormalised to sum to 1. For cold-start users the popularity weight is
+ * boosted before renormalisation so a thin profile does not over-fit.
  *
  * Signals: `content` is a signed cosine affinity in [-1, 1] (a negative value
  * — the profile dislikes the project's features — legitimately lowers the
@@ -60,11 +61,15 @@ export interface ResolveWeightsOptions {
   explorationPreference?: number;
   coldStart?: boolean;
   coldStartPopularityMultiplier?: number;
+  /** Session confidence in [0, 1]; scales the session component's raw weight (omitted = 0 → no session weight). */
+  sessionConfidence?: number;
 }
 
 /**
  * Raw (un-normalised) weight of one component for a preference `e`:
- *   max(0, base[c] + slope[c] · e), popularity additionally × multiplier for cold-start users.
+ *   max(0, base[c] + slope[c] · e); popularity additionally × multiplier for
+ *   cold-start users; session additionally × sessionConfidence (so a session
+ *   without evidence carries no weight and a strong coherent one approaches base.session).
  */
 export function rawRankingWeight(component: ScoreComponent, options: ResolveWeightsOptions = {}): number {
   const base = options.base ?? RECOMMENDER_CONFIG.rankingWeights;
@@ -73,6 +78,10 @@ export function rawRankingWeight(component: ScoreComponent, options: ResolveWeig
   const e = Math.max(0, Math.min(1, Number.isFinite(options.explorationPreference ?? 0) ? (options.explorationPreference ?? 0) : 0));
   let weight = Math.max(0, base[component] + slopes[component] * e);
   if (options.coldStart && component === "popularity") weight *= multiplier;
+  if (component === "session") {
+    const confidence = options.sessionConfidence ?? 0;
+    weight *= Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0;
+  }
   return weight;
 }
 
