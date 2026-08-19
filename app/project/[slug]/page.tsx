@@ -13,6 +13,7 @@ import { getOrCreateDemoUser } from "@/lib/demo-user";
 import { formatScore, splitParagraphs } from "@/lib/format";
 import { getProjectStateForUser } from "@/lib/profile/profile-service";
 import { getProjectRecommendationContext, getSimilarProjects } from "@/lib/recommendations/recommendation-service";
+import { discoveryMode } from "@/lib/recommender/recommend";
 
 export const dynamic = "force-dynamic";
 
@@ -97,6 +98,8 @@ export default async function ProjectPage({ params, searchParams }: { params: Pr
                   score={recommendation.score}
                   sources={recommendation.sources}
                   collaborative={recommendation.collaborative}
+                  novelty={recommendation.novelty}
+                  discoveryMode={discoveryMode(recommendation.explorationPreference)}
                 />
               </div>
             </details>

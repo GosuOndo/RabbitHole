@@ -24,6 +24,7 @@ function item(slug: string, savedAt: Date, matchScore: number, extra: Partial<Sa
     },
     savedAt,
     matchScore,
+    noveltyScore: 0,
     built: false,
     completed: false,
     ...extra,
@@ -100,5 +101,15 @@ describe("applySavedFilters / sortSavedProjects", () => {
     ]);
     expect(sortSavedProjects(items, "recent")).toEqual(sortSavedProjects(items, "recent"));
     expect(items.map((i) => i.project.slug)[0]).toBe("build-your-own-redis"); // input untouched
+  });
+
+  it("sorts 'most adventurous' by real novelty scores with recency tie-breaks", () => {
+    const withNovelty = items.map((item, index) => ({ ...item, noveltyScore: [0.2, 0.9, 0.9, 0.5][index]! }));
+    expect(sortSavedProjects(withNovelty, "adventurous").map((i) => i.project.slug)).toEqual([
+      "markov-chain-text-generator", // 0.9, saved more recently
+      "implement-a-ray-tracer", // 0.9
+      "implement-raft-consensus", // 0.5
+      "build-your-own-redis", // 0.2
+    ]);
   });
 });

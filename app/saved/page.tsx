@@ -25,6 +25,7 @@ const SORT_LABELS: Record<SavedSort, string> = {
   match: "Best match",
   shortest: "Shortest first",
   difficulty: "Difficulty",
+  adventurous: "Most adventurous",
 };
 
 type SearchParams = Record<string, string | string[] | undefined>;

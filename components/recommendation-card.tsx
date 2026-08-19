@@ -6,6 +6,7 @@ import { RecommendationExplanation } from "@/components/recommendation-explanati
 import { Button, ButtonLink } from "@/components/ui/button";
 import { formatScore } from "@/lib/format";
 import type { RecommendationView } from "@/lib/recommendations/recommendation-service";
+import type { DiscoveryMode } from "@/lib/recommender/recommend";
 
 export interface RecommendationCardState {
   saved: boolean;
@@ -24,6 +25,7 @@ export function RecommendationCard({
   state,
   isCurrent,
   explanationOpen,
+  discoveryMode,
   onNope,
   onToggleSave,
   onBuild,
@@ -35,6 +37,7 @@ export function RecommendationCard({
   state: RecommendationCardState;
   isCurrent: boolean;
   explanationOpen: boolean;
+  discoveryMode: DiscoveryMode;
   onNope: () => void;
   onToggleSave: () => void;
   onBuild: () => void;
@@ -96,6 +99,9 @@ export function RecommendationCard({
           score={item.score}
           sources={item.sources}
           collaborative={item.collaborative}
+          novelty={item.novelty}
+          exploration={item.exploration}
+          discoveryMode={discoveryMode}
         />
       ) : null}
 

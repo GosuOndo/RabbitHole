@@ -81,5 +81,7 @@ export function profileInput(longTerm: InterestProfile, extra: Partial<Recommend
     session: extra.session ?? emptySession,
     excludedProjectIds: extra.excludedProjectIds ?? new Set(),
     savedProjectIds: extra.savedProjectIds ?? new Set(),
+    // Tests default to Familiar so Phase 3/4 expectations about ordering stay meaningful.
+    explorationPreference: extra.explorationPreference ?? 0,
   };
 }

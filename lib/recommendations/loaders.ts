@@ -80,7 +80,13 @@ export async function loadRecommendationProfile(userId: string, now: Date): Prom
     if (state.excludedFromDiscovery) excludedProjectIds.add(state.projectId);
     if (state.saved) savedProjectIds.add(state.projectId);
   }
-  return { longTerm: data.longTerm, session: data.session, excludedProjectIds, savedProjectIds };
+  return {
+    longTerm: data.longTerm,
+    session: data.session,
+    excludedProjectIds,
+    savedProjectIds,
+    explorationPreference: data.user.explorationPreference,
+  };
 }
 
 /** Default dependency wiring for the orchestrator. */

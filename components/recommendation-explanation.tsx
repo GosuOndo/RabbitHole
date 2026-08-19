@@ -1,5 +1,7 @@
 import type { Explanation } from "@/lib/recommender/explain";
-import type { CollaborativeItemDiagnostics } from "@/lib/recommender/recommend";
+import type { ExplorationDiagnostics } from "@/lib/recommender/exploration";
+import type { NoveltyBreakdown } from "@/lib/recommender/novelty";
+import type { CollaborativeItemDiagnostics, DiscoveryMode } from "@/lib/recommender/recommend";
 import type { RankingWeights, ScoreBreakdown } from "@/lib/recommender/types";
 
 const FACTOR_LABELS: Record<Explanation["primary"], string> = {
@@ -7,6 +9,7 @@ const FACTOR_LABELS: Record<Explanation["primary"], string> = {
   taste: "Long-term taste",
   session: "This session",
   collaborative: "People who liked what you liked",
+  novelty: "Novelty / exploration",
   fit: "Difficulty / duration / language fit",
   popularity: "Popularity",
   catalog: "Catalog",
@@ -20,12 +23,18 @@ const SEED_STATE_LABEL: Record<CollaborativeItemDiagnostics["seeds"][number]["st
   opened: "opened",
 };
 
+export const DISCOVERY_MODE_LABEL: Record<DiscoveryMode, string> = {
+  familiar: "Familiar",
+  balanced: "Balanced",
+  adventurous: "Adventurous",
+};
+
 /**
  * "Why this recommendation?" — the explanation factors plus the score
  * breakdown. Numbers are the normalised component signals and the weights
  * used; "—" means the signal was unavailable for this project (no evidence),
  * which is different from a score of 0. The final value is a match score, not
- * a probability.
+ * a probability, and it is never the diversification (MMR) score.
  */
 export function RecommendationExplanation({
   explanation,
@@ -34,6 +43,9 @@ export function RecommendationExplanation({
   score,
   sources,
   collaborative,
+  novelty,
+  exploration,
+  discoveryMode,
   id,
 }: {
   explanation: Explanation;
@@ -42,11 +54,15 @@ export function RecommendationExplanation({
   score: number;
   sources: readonly string[];
   collaborative?: CollaborativeItemDiagnostics | null;
+  novelty?: NoveltyBreakdown | null;
+  exploration?: ExplorationDiagnostics | null;
+  discoveryMode?: DiscoveryMode | null;
   id?: string;
 }) {
   const rows: { label: string; value: number | null; weight?: number }[] = [
     { label: "Content affinity", value: breakdown.content, weight: weights.content },
     { label: "Collaborative signal", value: breakdown.collaborative, weight: weights.collaborative },
+    { label: "Novelty", value: breakdown.novelty, weight: weights.novelty },
     { label: "Popularity", value: breakdown.popularity, weight: weights.popularity },
   ];
   return (
@@ -74,6 +90,26 @@ export function RecommendationExplanation({
         <dd className="border-t border-border pt-1 text-right font-medium">{score.toFixed(2)}</dd>
         <dd className="border-t border-border pt-1 text-right text-subtle">{sources.join(" + ")}</dd>
       </dl>
+      {novelty || discoveryMode ? (
+        <p className="mt-2 text-xs text-subtle" data-testid="novelty-detail">
+          {novelty ? (
+            <>
+              Novelty = 0.65 × underexposure {novelty.underexposure.toFixed(2)} + 0.35 × adjacency {novelty.adjacency.toFixed(2)}
+            </>
+          ) : null}
+          {discoveryMode ? (
+            <>
+              {novelty ? " · " : ""}Discovery mode: {DISCOVERY_MODE_LABEL[discoveryMode]}
+            </>
+          ) : null}
+        </p>
+      ) : null}
+      {exploration ? (
+        <p className="mt-1 text-xs text-subtle" data-testid="exploration-detail">
+          Retrieved for exploration: score {exploration.explorationScore.toFixed(2)} from plausibility {exploration.plausibility.toFixed(2)} (
+          {exploration.plausibilitySource}) and novelty {exploration.novelty.toFixed(2)}.
+        </p>
+      ) : null}
       {collaborative && collaborative.seeds.length > 0 ? (
         <div className="mt-3 text-xs" data-testid="collaborative-evidence">
           <p className="text-subtle">

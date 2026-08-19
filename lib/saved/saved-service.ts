@@ -1,7 +1,9 @@
 import type { ProjectSummary } from "@/lib/catalog/queries";
 import { loadUserProfileData } from "@/lib/profile/profile-service";
-import { loadCatalogItems } from "@/lib/recommendations/loaders";
+import { loadCatalogItems, loadPopularityEvidence } from "@/lib/recommendations/loaders";
 import { toProjectSummary } from "@/lib/recommendations/recommendation-service";
+import { computeNovelty } from "@/lib/recommender/novelty";
+import { computePopularityScores } from "@/lib/recommender/popularity";
 import { blendProfiles } from "@/lib/recommender/session";
 import { cosineSimilarity } from "@/lib/recommender/similarity";
 import { applySavedFilters, sortSavedProjects, type SavedFilters, type SavedProjectItem } from "./saved-filters";
@@ -20,22 +22,25 @@ export interface SavedProjectsPage {
   hasProfile: boolean;
 }
 
-/** Saved projects for a user with live content-match scores, filters and sorting. */
+/** Saved projects for a user with live content-match and novelty scores, filters and sorting. */
 export async function getSavedProjects(userId: string, filters: SavedFilters = {}, now: Date = new Date()): Promise<SavedProjectsPage> {
-  const [data, catalog] = await Promise.all([loadUserProfileData(userId, now), loadCatalogItems()]);
+  const [data, catalog, popularityEvidence] = await Promise.all([loadUserProfileData(userId, now), loadCatalogItems(), loadPopularityEvidence()]);
   const effective = blendProfiles(data.longTerm, data.session);
   const hasProfile = Object.keys(effective.vector).length > 0;
   const byId = new Map(catalog.map((item) => [item.id, item]));
+  const popularity = computePopularityScores(catalog, popularityEvidence);
 
   const items: SavedProjectItem[] = [];
   for (const state of data.states.values()) {
     if (!state.saved || !state.savedAt) continue;
     const item = byId.get(state.projectId);
     if (!item) continue;
+    const matchScore = hasProfile ? cosineSimilarity(effective.vector, item.vector) : 0;
     items.push({
       project: toProjectSummary(item),
       savedAt: state.savedAt,
-      matchScore: hasProfile ? cosineSimilarity(effective.vector, item.vector) : 0,
+      matchScore,
+      noveltyScore: computeNovelty({ popularityScore: popularity.get(item.id)?.score ?? 0, contentAffinity: hasProfile ? matchScore : null }).novelty,
       built: state.built,
       completed: state.completed,
     });

@@ -13,11 +13,14 @@ import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
 import { explainRecommendation, type Explanation } from "@/lib/recommender/explain";
 import { computePopularityScores } from "@/lib/recommender/popularity";
 import { rankCandidates, resolveRankingWeights } from "@/lib/recommender/rank";
+import type { ExplorationDiagnostics } from "@/lib/recommender/exploration";
+import { computeNovelty, type NoveltyBreakdown } from "@/lib/recommender/novelty";
 import {
   describeSupportingSeeds,
   recommendForUser,
   resolveAvailableComponents,
   type CollaborativeItemDiagnostics,
+  type DiversificationItemDiagnostics,
   type RecommendationContext,
   type RecommenderDeps,
 } from "@/lib/recommender/recommend";
@@ -35,8 +38,11 @@ import {
 } from "./loaders";
 
 export interface RecommendationView {
+  /** Final position after diversification. */
   rank: number;
-  /** Match score in [0, 1] — not a calibrated probability. */
+  /** Position after hybrid ranking, before diversification. */
+  preDiversificationRank: number;
+  /** Match score in [0, 1] — not a calibrated probability, never the MMR score. */
   score: number;
   /** Per-component signals; `null` = no evidence for this candidate. */
   breakdown: ScoreBreakdown;
@@ -46,6 +52,10 @@ export interface RecommendationView {
   saved: boolean;
   /** Collaborative evidence behind this recommendation (null when none). */
   collaborative: CollaborativeItemDiagnostics | null;
+  novelty: NoveltyBreakdown;
+  /** Exploration retrieval diagnostics (null unless the exploration source retrieved it). */
+  exploration: ExplorationDiagnostics | null;
+  diversification: DiversificationItemDiagnostics;
   project: ProjectSummary;
 }
 
@@ -96,6 +106,7 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
       return [
         {
           rank: item.rank,
+          preDiversificationRank: item.preDiversificationRank,
           score: item.score,
           breakdown: item.breakdown,
           weights: item.weights,
@@ -103,6 +114,9 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
           explanation: item.explanation,
           saved: item.saved,
           collaborative: item.collaborative,
+          novelty: item.novelty,
+          exploration: item.exploration,
+          diversification: item.diversification,
           project: toProjectSummary(project),
         },
       ];
@@ -134,6 +148,8 @@ export interface ProjectRecommendationContext {
   sources: CandidateSource[];
   explanation: Explanation;
   collaborative: CollaborativeItemDiagnostics | null;
+  novelty: NoveltyBreakdown;
+  explorationPreference: number;
   coldStart: boolean;
   excludedFromDiscovery: boolean;
 }
@@ -170,8 +186,10 @@ export async function getProjectRecommendationContext(userId: string, projectId:
   const collaborativeAvailable = seeds.length > 0 && scoring.scores.size > 0;
   const seedViews = describeSupportingSeeds(scoring, project.id, projectById);
 
+  const novelty = computeNovelty({ popularityScore: popularity?.score ?? 0, contentAffinity });
   const sources: CandidateSource[] = evidence ? ["content", "collaborative"] : ["content"];
-  const weights = resolveRankingWeights(resolveAvailableComponents({ profileEmpty, collaborativeAvailable }), { coldStart });
+  const explorationPreference = profile.explorationPreference;
+  const weights = resolveRankingWeights(resolveAvailableComponents({ profileEmpty, collaborativeAvailable }), { coldStart, explorationPreference });
   const [ranked] = rankCandidates(
     [
       {
@@ -182,6 +200,7 @@ export async function getProjectRecommendationContext(userId: string, projectId:
         signals: {
           content: contentAffinity,
           ...(evidence ? { collaborative: evidence.score } : {}),
+          novelty: novelty.novelty,
           popularity: popularity?.score ?? 0,
         },
         saved: profile.savedProjectIds.has(project.id),
@@ -203,6 +222,8 @@ export async function getProjectRecommendationContext(userId: string, projectId:
     collaborativeScore: evidence?.score ?? null,
     collaborativeSeeds: seedViews.map((s) => ({ projectId: s.projectId, title: s.title, state: s.state, contribution: s.contribution })),
     weights,
+    novelty,
+    explorationPreference,
   });
   return {
     score: ranked.score,
@@ -211,6 +232,8 @@ export async function getProjectRecommendationContext(userId: string, projectId:
     sources,
     explanation,
     collaborative: evidence ? { score: evidence.score, rawEvidence: evidence.rawEvidence, confidence: scoring.confidence, seeds: seedViews } : null,
+    novelty,
+    explorationPreference,
     coldStart,
     excludedFromDiscovery: profile.excludedProjectIds.has(project.id),
   };

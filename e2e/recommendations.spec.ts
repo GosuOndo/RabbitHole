@@ -14,19 +14,43 @@ type FeedResponse = {
     score: number;
     project: { id: string; slug: string; title: string };
     explanation: { text: string; primary: string; factors: { kind: string; features: { id: string; label: string }[] }[] };
+    preDiversificationRank: number;
     sources: string[];
-    breakdown: { content: number | null; collaborative: number | null; popularity: number | null };
-    weights: { content?: number; collaborative?: number; popularity?: number };
+    breakdown: { content: number | null; collaborative: number | null; novelty: number | null; popularity: number | null };
+    weights: { content?: number; collaborative?: number; novelty?: number; popularity?: number };
     collaborative: { score: number; confidence: number; seeds: { projectId: string; slug: string; title: string; state: string; similarity: number }[] } | null;
+    novelty: { novelty: number; underexposure: number; adjacency: number };
+    exploration: { explorationScore: number; plausibility: number; plausibilitySource: string } | null;
+    diversification: { mmrScore: number; maxSimilarityToSelected: number; admittedUnderRelaxation: boolean };
   }[];
-  pipeline: { contentCandidates: number; collaborativeCandidates: number; popularCandidates: number; uniqueCandidates: number; afterFiltering: number; ranked: number; final: number };
+  pipeline: {
+    contentCandidates: number;
+    collaborativeCandidates: number;
+    popularCandidates: number;
+    explorationCandidates: number;
+    uniqueCandidates: number;
+    afterFiltering: number;
+    ranked: number;
+    preDiversificationCandidates: number;
+    diversifiedCandidates: number;
+    final: number;
+  };
   context: {
     coldStart: boolean;
     profileEmpty: boolean;
     collaborative: { available: boolean; seedCount: number; confidence: number; candidatesWithEvidence: number };
+    exploration: { preference: number; mode: string; candidateLimit: number };
+    diversification: { applied: boolean; lambda: number; maxTagShare: number; maxPerTag: number; relaxationLevel: number };
     components: string[];
   };
 };
+
+async function setExplorationPreference(request: APIRequestContext, value: number): Promise<void> {
+  const response = await request.patch("/api/profile", { data: { explorationPreference: value } });
+  expect(response.ok()).toBe(true);
+  const profile = await (await request.get("/api/profile")).json();
+  expect(profile.user.explorationPreference).toBeCloseTo(value, 6);
+}
 
 async function ensureOnboarded(request: APIRequestContext): Promise<void> {
   const profile = await (await request.get("/api/profile")).json();
@@ -88,9 +112,9 @@ test.describe("recommendation API", () => {
     expect(typeof feed.pipeline.collaborativeCandidates).toBe("number");
     expect(feed.context.collaborative.available).toBe(true);
     expect(feed.context.collaborative.seedCount).toBeGreaterThan(0);
-    expect(feed.context.components).toEqual(["content", "collaborative", "popularity"]);
+    expect(feed.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
     for (const item of feed.items) {
-      for (const key of ["content", "collaborative", "popularity"] as const) {
+      for (const key of ["content", "collaborative", "novelty", "popularity"] as const) {
         const value = item.breakdown[key];
         expect(value === null || (typeof value === "number" && Number.isFinite(value))).toBe(true);
       }
@@ -118,6 +142,83 @@ test.describe("recommendation API", () => {
     // Time decay uses the request time, so scores can drift in the far decimals
     // between two calls; ordering and rounded scores must be identical.
     expect(a.items.map((i) => [i.project.slug, i.score.toFixed(4)])).toEqual(b.items.map((i) => [i.project.slug, i.score.toFixed(4)]));
+  });
+
+  test("exposes exploration, novelty and diversification diagnostics, and the exploration preference changes the feed", async ({ request }) => {
+    const original = (await (await request.get("/api/profile")).json()).user.explorationPreference as number;
+    try {
+      await setExplorationPreference(request, 0);
+      const familiar = await fetchFeed(request, 10);
+      await setExplorationPreference(request, 1);
+      const adventurous = await fetchFeed(request, 10);
+
+      expect(familiar.context.exploration).toMatchObject({ preference: 0, mode: "familiar", candidateLimit: 8 });
+      expect(adventurous.context.exploration).toMatchObject({ preference: 1, mode: "adventurous", candidateLimit: 15 });
+      expect(familiar.pipeline.explorationCandidates).toBe(8);
+      expect(adventurous.pipeline.explorationCandidates).toBe(15);
+      for (const feed of [familiar, adventurous]) {
+        expect(feed.context.diversification.applied).toBe(true);
+        expect(feed.pipeline.preDiversificationCandidates).toBe(feed.pipeline.ranked);
+        expect(feed.pipeline.diversifiedCandidates).toBe(feed.items.length);
+        expect(new Set(feed.items.map((i) => i.project.id)).size).toBe(feed.items.length);
+        expect(feed.items[0]!.rank).toBe(1);
+        expect(feed.items[0]!.preDiversificationRank).toBe(1);
+        for (const item of feed.items) {
+          expect(item.breakdown.novelty).not.toBeNull();
+          expect(item.novelty.novelty).toBeGreaterThanOrEqual(0);
+          expect(item.novelty.novelty).toBeLessThanOrEqual(1);
+          expect(item.diversification.mmrScore).toBeLessThanOrEqual(item.score + 1e-9);
+          if (item.sources.includes("exploration")) expect(item.exploration).not.toBeNull();
+          else expect(item.exploration).toBeNull();
+        }
+      }
+      // Weights move with the preference and remain normalised.
+      const sum = (w: FeedResponse["items"][number]["weights"]) => Object.values(w).reduce((s, v) => s + (v ?? 0), 0);
+      expect(sum(familiar.items[0]!.weights)).toBeCloseTo(1, 6);
+      expect(sum(adventurous.items[0]!.weights)).toBeCloseTo(1, 6);
+      expect(adventurous.items[0]!.weights.novelty!).toBeGreaterThan(familiar.items[0]!.weights.novelty!);
+      expect(adventurous.items[0]!.weights.content!).toBeLessThan(familiar.items[0]!.weights.content!);
+      expect(adventurous.context.diversification.lambda).toBeLessThan(familiar.context.diversification.lambda);
+      // Composition changes but relevance is kept: not the same top-10, more novelty on average, no dislikes resurface.
+      const familiarIds = new Set(familiar.items.map((i) => i.project.id));
+      const overlap = adventurous.items.filter((i) => familiarIds.has(i.project.id)).length;
+      expect(overlap).toBeLessThan(familiar.items.length);
+      const meanNovelty = (feed: FeedResponse) => feed.items.reduce((s, i) => s + i.novelty.novelty, 0) / feed.items.length;
+      expect(meanNovelty(adventurous)).toBeGreaterThan(meanNovelty(familiar));
+      for (const item of adventurous.items) expect((item.breakdown.content ?? 0) > 0 || (item.breakdown.collaborative ?? 0) > 0).toBe(true);
+    } finally {
+      await setExplorationPreference(request, original);
+    }
+  });
+
+  test("rejects invalid exploration preferences and keeps dislikes/builds excluded for every preference", async ({ request }) => {
+    const original = (await (await request.get("/api/profile")).json()).user.explorationPreference as number;
+    expect((await request.patch("/api/profile", { data: { explorationPreference: 1.5 } })).status()).toBe(400);
+    expect((await request.patch("/api/profile", { data: { explorationPreference: -0.1 } })).status()).toBe(400);
+    expect((await request.patch("/api/profile", { data: { explorationPreference: "high" } })).status()).toBe(400);
+    expect((await (await request.get("/api/profile")).json()).user.explorationPreference).toBeCloseTo(original, 6);
+
+    // Create real terminal states from the current feed: dislike one recommendation, mark another as built.
+    const seedFeed = await fetchFeed(request, 30);
+    const [toDislike, toBuild] = seedFeed.items.slice(-2);
+    expect(toDislike && toBuild).toBeTruthy();
+    for (const [item, type] of [
+      [toDislike!, "DISLIKE"],
+      [toBuild!, "BUILD"],
+    ] as const) {
+      const response = await request.post("/api/interactions", { data: { projectId: item.project.id, type } });
+      expect(response.ok()).toBe(true);
+    }
+    const excluded = new Set([toDislike!.project.id, toBuild!.project.id]);
+    try {
+      for (const value of [0, 1]) {
+        await setExplorationPreference(request, value);
+        const feed = await fetchFeed(request, 30);
+        for (const item of feed.items) expect(excluded.has(item.project.id)).toBe(false);
+      }
+    } finally {
+      await setExplorationPreference(request, original);
+    }
   });
 });
 
@@ -163,7 +264,7 @@ test.describe("discover feed", () => {
     expect(await impressionsSoFar()).toBeLessThanOrEqual(cardCount * 2);
   });
 
-  test("Why? reveals the score breakdown", async ({ page }) => {
+  test("Why? reveals the score breakdown including the Novelty row", async ({ page }) => {
     await page.goto("/discover");
     const first = page.getByTestId("recommendation-card").first();
     await first.getByRole("button", { name: "Why?" }).click();
@@ -171,9 +272,58 @@ test.describe("discover feed", () => {
     await expect(explanation).toBeVisible();
     await expect(explanation).toContainText("Content affinity");
     await expect(explanation).toContainText("Collaborative signal");
+    await expect(explanation).toContainText("Novelty");
+    await expect(explanation).toContainText("Popularity");
     await expect(explanation).toContainText("Match score");
+    await expect(explanation).toContainText("Discovery mode:");
     await first.getByRole("button", { name: "Why?" }).click();
     await expect(explanation).toBeHidden();
+  });
+
+  test("the discovery-mode slider loads the persisted preference, saves changes, refreshes the feed and survives reload", async ({ page, request }) => {
+    const original = (await (await request.get("/api/profile")).json()).user.explorationPreference as number;
+    try {
+      await setExplorationPreference(request, 0);
+      await page.goto("/discover");
+      const slider = page.getByRole("slider", { name: "Discovery mode" });
+      await expect(slider).toBeVisible();
+      await expect(slider).toHaveValue("0");
+      await expect(page.getByTestId("exploration-slider")).toContainText("Familiar");
+      await expect(page.getByTestId("recommendation-feed")).toHaveAttribute("data-hydrated", "true");
+      const familiarFirst = await firstCardSlug(page);
+      const familiarSlugs = await page.getByTestId("recommendation-card").evaluateAll((cards) => cards.map((c) => c.getAttribute("data-project-slug")));
+
+      // Move to fully adventurous with the keyboard (accessible range input), then wait for the debounced PATCH + refetch.
+      await slider.focus();
+      const patch = page.waitForResponse((response) => response.url().includes("/api/profile") && response.request().method() === "PATCH");
+      const refetch = page.waitForResponse((response) => response.url().includes("/api/recommendations") && response.request().method() === "GET");
+      await slider.press("End");
+      await expect(slider).toHaveValue("1");
+      expect((await patch).ok()).toBe(true);
+      expect((await refetch).ok()).toBe(true);
+      await expect(page.getByTestId("feed-message")).toContainText("Feed refreshed for your discovery mode.");
+      await expect(page.getByTestId("exploration-slider")).toContainText("Adventurous");
+      await expect(page.getByTestId("feed-context")).toContainText("Adventurous");
+
+      // The preference is persisted server-side and the feed composition actually changed.
+      const profile = await (await request.get("/api/profile")).json();
+      expect(profile.user.explorationPreference).toBeCloseTo(1, 6);
+      const adventurousSlugs = await page.getByTestId("recommendation-card").evaluateAll((cards) => cards.map((c) => c.getAttribute("data-project-slug")));
+      expect(new Set(adventurousSlugs).size).toBe(adventurousSlugs.length);
+      expect(adventurousSlugs).not.toEqual(familiarSlugs);
+      const feed = await fetchFeed(request, 10);
+      await expect(page.getByTestId("recommendation-card").first()).toHaveAttribute("data-project-slug", feed.items[0]!.project.slug);
+      expect(feed.context.exploration.mode).toBe("adventurous");
+
+      // Reload: the slider reflects the stored value and the feed is served for it.
+      await page.reload();
+      await expect(page.getByRole("slider", { name: "Discovery mode" })).toHaveValue("1");
+      await expect(page.getByTestId("recommendation-card").first()).toBeVisible();
+      await expect(page.getByTestId("feed-context")).toContainText("Adventurous");
+      expect(typeof familiarFirst).toBe("string");
+    } finally {
+      await setExplorationPreference(request, original);
+    }
   });
 
   test("a card with collaborative evidence lists the user's own seed projects in the breakdown", async ({ page, request }) => {
@@ -252,6 +402,8 @@ test.describe("discover feed", () => {
     const cards = page.getByTestId("recommendation-card");
     await expect(cards.first()).toBeVisible();
     await expect(cards.first()).toHaveAttribute("aria-current", "true");
+    // Keyboard shortcuts are client-side: wait until React has hydrated the feed.
+    await expect(page.getByTestId("recommendation-feed")).toHaveAttribute("data-hydrated", "true");
 
     await page.keyboard.press("ArrowRight");
     await expect(cards.nth(1)).toHaveAttribute("aria-current", "true");

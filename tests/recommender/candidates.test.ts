@@ -88,6 +88,58 @@ describe("mergeCandidateSets with three sources", () => {
   });
 });
 
+describe("mergeCandidateSets with four sources (content, collaborative, popular, exploration)", () => {
+  const content4: RetrievedCandidate[] = [
+    { projectId: "A", source: "content", signal: 0.7 },
+    { projectId: "E", source: "content", signal: 0.6 },
+    { projectId: "G", source: "content", signal: 0.5 },
+  ];
+  const collaborative4: RetrievedCandidate[] = [
+    { projectId: "B", source: "collaborative", signal: 0.8 },
+    { projectId: "F", source: "collaborative", signal: 0.55 },
+    { projectId: "G", source: "collaborative", signal: 0.45 },
+  ];
+  const popular4: RetrievedCandidate[] = [
+    { projectId: "C", source: "popular", signal: 0.9 },
+    { projectId: "G", source: "popular", signal: 0.85 },
+  ];
+  const exploration4: RetrievedCandidate[] = [
+    { projectId: "D", source: "exploration", signal: 0.65 },
+    { projectId: "E", source: "exploration", signal: 0.62 },
+    { projectId: "F", source: "exploration", signal: 0.58 },
+    { projectId: "G", source: "exploration", signal: 0.4 },
+    { projectId: "H", source: "exploration", signal: Number.NaN },
+  ];
+
+  it("keeps one candidate per project with every genuine source and raw signal, in first-seen order", () => {
+    const merged = mergeCandidateSets([content4, collaborative4, popular4, exploration4]);
+    const byId = new Map(merged.map((c) => [c.projectId, c]));
+    expect(merged.map((c) => c.projectId)).toEqual(["A", "E", "G", "B", "F", "C", "D"]);
+    expect(byId.get("A")).toEqual({ projectId: "A", sources: ["content"], signals: { content: 0.7 } });
+    expect(byId.get("B")).toEqual({ projectId: "B", sources: ["collaborative"], signals: { collaborative: 0.8 } });
+    expect(byId.get("C")).toEqual({ projectId: "C", sources: ["popular"], signals: { popular: 0.9 } });
+    expect(byId.get("D")).toEqual({ projectId: "D", sources: ["exploration"], signals: { exploration: 0.65 } });
+    expect(byId.get("E")).toEqual({ projectId: "E", sources: ["content", "exploration"], signals: { content: 0.6, exploration: 0.62 } });
+    expect(byId.get("F")).toEqual({ projectId: "F", sources: ["collaborative", "exploration"], signals: { collaborative: 0.55, exploration: 0.58 } });
+    expect(byId.get("G")).toEqual({
+      projectId: "G",
+      sources: ["content", "collaborative", "popular", "exploration"],
+      signals: { content: 0.5, collaborative: 0.45, popular: 0.85, exploration: 0.4 },
+    });
+    // The non-finite exploration signal is ignored (H never becomes a candidate).
+    expect(byId.has("H")).toBe(false);
+    expect(mergeCandidateSets([content4, collaborative4, popular4, exploration4])).toEqual(merged);
+    expect(countBySource([content4, collaborative4, popular4, exploration4], "exploration")).toBe(5);
+  });
+
+  it("filters excluded projects regardless of source, including exploration-only ones", () => {
+    const merged = mergeCandidateSets([content4, collaborative4, popular4, exploration4]);
+    const { kept, removed } = filterCandidates(merged, { excludedProjectIds: new Set(["D", "G"]) });
+    expect(kept.map((c) => c.projectId)).toEqual(["A", "E", "B", "F", "C"]);
+    expect(removed.map((r) => r.projectId).sort()).toEqual(["D", "G"]);
+  });
+});
+
 describe("filterCandidates", () => {
   it("removes excluded and unknown projects and reports why", () => {
     const merged = mergeCandidateSets([content, popular]);

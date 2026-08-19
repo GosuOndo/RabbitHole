@@ -1,19 +1,20 @@
 /**
  * Recommendation orchestration.
  *
- *   profile (long-term + session)  ──▶ effective profile vector
+ *   profile (long-term + session) ──▶ effective profile vector          explorationPreference e ∈ [0, 1]
  *          │
  *          ├─▶ content candidates        (cosine affinity, ~50)
  *          ├─▶ collaborative candidates  (item-item neighbours of the user's positive projects, ~30)
- *          └─▶ popularity candidates     (seed prior + behaviour, ~15)
+ *          ├─▶ popularity candidates     (seed prior + behaviour, ~15)
+ *          └─▶ exploration candidates    (plausible + novel, ~8–15 growing with e)
  *                     │
- *              merge (keep all sources) ─▶ filter (terminal states) ─▶ signals ─▶ hybrid rank ─▶ top-K ─▶ explain
+ *              merge (keep all sources) ─▶ filter (terminal states) ─▶ novelty + signals
+ *                     ─▶ exploration-aware hybrid rank ─▶ diversify (MMR) ─▶ final top-K ─▶ explain
  *
  * `runRecommendationPipeline` is pure (fixtures in, recommendations out) so
  * the whole lifecycle is unit-testable; `recommendForUser` only loads data
- * through injected loaders and calls it. Exploration, novelty and
- * diversification are added by later phases as extra retrieval sources /
- * ranking components without changing this shape.
+ * through injected loaders and calls it. Session-aware re-ranking (Phase 6)
+ * slots in as another ranking component without changing this shape.
  */
 
 import { countBySource, filterCandidates, mergeCandidateSets } from "./candidates";
@@ -28,11 +29,14 @@ import {
 } from "./collaborative";
 import { RECOMMENDER_CONFIG } from "./config";
 import { retrieveContentCandidates, scoreContentAffinity } from "./content";
+import { diversifyRanked, type DiversifyResult } from "./diversify";
 import { explainRecommendation, type CollaborativeSeedReference, type Explanation } from "./explain";
+import { retrieveExplorationCandidates, type ExplorationDiagnostics } from "./exploration";
 import type { FeatureFamily } from "./features";
+import { computeNovelty, type NoveltyBreakdown } from "./novelty";
 import { computePopularityScores, retrievePopularityCandidates } from "./popularity";
 import type { InterestProfile } from "./profile";
-import { rankCandidates, resolveRankingWeights, type RankingInput } from "./rank";
+import { rankCandidates, resolveRankingWeights, type RankedCandidate, type RankingInput } from "./rank";
 import { blendProfiles } from "./session";
 import { cosineSimilarity } from "./similarity";
 import type {
@@ -45,7 +49,7 @@ import type {
   ScoreComponent,
 } from "./types";
 
-export const RECOMMENDER_ALGORITHM = "hybrid-v1";
+export const RECOMMENDER_ALGORITHM = "hybrid-explore-v1";
 
 export type LabelResolver = (family: FeatureFamily, key: string) => string;
 
@@ -56,6 +60,8 @@ export interface RecommendationProfileInput {
   excludedProjectIds: ReadonlySet<string>;
   /** Currently saved projects — eligible but demoted. */
   savedProjectIds: ReadonlySet<string>;
+  /** Persisted Familiar (0) ↔ Adventurous (1) preference. */
+  explorationPreference: number;
 }
 
 export interface RecommendationPipelineInput {
@@ -89,11 +95,21 @@ export interface CollaborativeItemDiagnostics {
   seeds: CollaborativeSeedView[];
 }
 
+export interface DiversificationItemDiagnostics {
+  /** λ · relevance − (1 − λ) · maxSimilarityToSelected — diagnostic only, never the match score. */
+  mmrScore: number;
+  maxSimilarityToSelected: number;
+  admittedUnderRelaxation: boolean;
+}
+
 export interface RecommendationItem {
+  /** Final position after diversification (1-based). */
   rank: number;
+  /** Position after hybrid ranking, before diversification (1-based). */
+  preDiversificationRank: number;
   projectId: string;
   slug: string;
-  /** Match score in [0, 1] (not a calibrated probability). */
+  /** Hybrid recommendation ("match") score in [0, 1] — not a calibrated probability, never replaced by the MMR score. */
   score: number;
   breakdown: ScoreBreakdown;
   weights: Partial<RankingWeights>;
@@ -103,6 +119,10 @@ export interface RecommendationItem {
   rawSignals: Record<string, number>;
   /** Present only when collaborative evidence exists for this project. */
   collaborative: CollaborativeItemDiagnostics | null;
+  novelty: NoveltyBreakdown;
+  /** Present when the exploration source retrieved this project. */
+  exploration: ExplorationDiagnostics | null;
+  diversification: DiversificationItemDiagnostics;
 }
 
 export interface CollaborativeContext {
@@ -116,6 +136,23 @@ export interface CollaborativeContext {
   modelItems: number;
 }
 
+export type DiscoveryMode = "familiar" | "balanced" | "adventurous";
+
+export interface ExplorationContext {
+  preference: number;
+  mode: DiscoveryMode;
+  /** Exploration candidates requested for this preference. */
+  candidateLimit: number;
+}
+
+export interface DiversificationContext {
+  applied: boolean;
+  lambda: number;
+  maxTagShare: number;
+  maxPerTag: number;
+  relaxationLevel: number;
+}
+
 export interface RecommendationContext {
   coldStart: boolean;
   profileEmpty: boolean;
@@ -123,6 +160,8 @@ export interface RecommendationContext {
   includesOnboarding: boolean;
   sessionWeight: number;
   collaborative: CollaborativeContext;
+  exploration: ExplorationContext;
+  diversification: DiversificationContext;
   /** Score components that carried weight for this user. */
   components: ScoreComponent[];
 }
@@ -139,8 +178,14 @@ export function resolveAvailableComponents(flags: { profileEmpty: boolean; colla
   const components: ScoreComponent[] = [];
   if (!flags.profileEmpty) components.push("content");
   if (flags.collaborativeAvailable) components.push("collaborative");
-  components.push("popularity");
+  components.push("novelty", "popularity");
   return components;
+}
+
+export function discoveryMode(preference: number, labels = RECOMMENDER_CONFIG.exploration.labels): DiscoveryMode {
+  if (preference <= labels.familiarMax) return "familiar";
+  if (preference >= labels.adventurousMin) return "adventurous";
+  return "balanced";
 }
 
 /** Seed views for one candidate, with titles resolved from the catalog. */
@@ -164,44 +209,63 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
   const { profile, catalog, labelFor } = input;
   const limit = Math.max(0, Math.floor(input.limit));
   const projectById = new Map(catalog.map((p) => [p.id, p]));
+  const explorationPreference = Math.max(
+    RECOMMENDER_CONFIG.exploration.minPreference,
+    Math.min(RECOMMENDER_CONFIG.exploration.maxPreference, Number.isFinite(profile.explorationPreference) ? profile.explorationPreference : RECOMMENDER_CONFIG.exploration.defaultPreference),
+  );
 
   // 1. Effective profile: long-term taste with a modest, fixed session blend.
   const effective = blendProfiles(profile.longTerm, profile.session);
   const coldStart = profile.longTerm.interactionCount < RECOMMENDER_CONFIG.coldStart.maxInteractions;
   const profileEmpty = Object.keys(effective.vector).length === 0;
 
-  // 2. Retrieval (each strategy excludes terminal-state projects itself).
-  const contentCandidates = retrieveContentCandidates(effective.vector, catalog, {
-    excludedProjectIds: profile.excludedProjectIds,
-  });
-
+  // 2. Per-project signals shared by retrieval and ranking.
+  const contentAffinity = scoreContentAffinity(effective.vector, catalog);
+  const popularityScores = computePopularityScores(catalog, input.popularityEvidence);
   const collaborativeModel = buildCollaborativeModel(input.interactions, { excludeUserId: input.userId });
   const seeds = collaborativeSeedsForUser(input.interactions, input.userId);
   const collaborativeScoring = scoreCollaborativeCandidates(collaborativeModel, seeds, {
     excludedProjectIds: profile.excludedProjectIds,
   });
+  const collaborativeAvailable = seeds.length > 0 && collaborativeScoring.scores.size > 0;
+  const noveltyByProject = new Map<string, NoveltyBreakdown>(
+    catalog.map((project) => [
+      project.id,
+      computeNovelty({
+        popularityScore: popularityScores.get(project.id)?.score ?? 0,
+        contentAffinity: profileEmpty ? null : (contentAffinity.get(project.id) ?? 0),
+      }),
+    ]),
+  );
+
+  // 3. Retrieval (each strategy excludes terminal-state projects itself).
+  const contentCandidates = retrieveContentCandidates(effective.vector, catalog, { excludedProjectIds: profile.excludedProjectIds });
   const collaborativeCandidates = retrieveCollaborativeCandidates(collaborativeScoring, catalog);
-
-  const popularityScores = computePopularityScores(catalog, input.popularityEvidence);
-  const popularityCandidates = retrievePopularityCandidates(popularityScores, catalog, {
+  const popularityCandidates = retrievePopularityCandidates(popularityScores, catalog, { excludedProjectIds: profile.excludedProjectIds });
+  const exploration = retrieveExplorationCandidates({
+    projects: catalog,
+    contentAffinity: profileEmpty ? null : contentAffinity,
+    collaborativeScores: collaborativeAvailable ? new Map([...collaborativeScoring.scores.entries()].map(([id, e]) => [id, e.score])) : null,
+    popularityScores: new Map([...popularityScores.entries()].map(([id, p]) => [id, p.score])),
+    novelty: noveltyByProject,
     excludedProjectIds: profile.excludedProjectIds,
+    explorationPreference,
   });
-  const candidateSets = [contentCandidates, collaborativeCandidates, popularityCandidates];
+  const candidateSets = [contentCandidates, collaborativeCandidates, popularityCandidates, exploration.candidates];
 
-  // 3. Merge (dedupe by project, keep every source) and filter.
+  // 4. Merge (dedupe by project, keep every source) and filter.
   const merged = mergeCandidateSets(candidateSets);
   const { kept } = filterCandidates(merged, {
     excludedProjectIds: profile.excludedProjectIds,
     knownProjectIds: new Set(projectById.keys()),
   });
 
-  // 4. Ranking signals for every surviving candidate (absent evidence stays absent).
-  const contentAffinity = scoreContentAffinity(effective.vector, catalog);
-  const collaborativeAvailable = seeds.length > 0 && collaborativeScoring.scores.size > 0;
+  // 5. Ranking signals for every surviving candidate (absent evidence stays absent; novelty always exists).
   const rankingInputs: RankingInput[] = kept.map((candidate) => {
     const project = projectById.get(candidate.projectId)!;
     const collaborative = collaborativeScoring.scores.get(project.id);
     const popularity = popularityScores.get(project.id);
+    const novelty = noveltyByProject.get(project.id)!;
     return {
       projectId: project.id,
       slug: project.slug,
@@ -210,6 +274,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       signals: {
         ...(profileEmpty ? {} : { content: contentAffinity.get(project.id) ?? 0 }),
         ...(collaborative ? { collaborative: collaborative.score } : {}),
+        novelty: novelty.novelty,
         popularity: popularity?.score ?? 0,
       },
       saved: profile.savedProjectIds.has(project.id),
@@ -220,18 +285,28 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
         popularityBehavioral: popularity?.behavioral ?? 0,
         collaborativeEvidence: collaborative?.rawEvidence ?? 0,
         collaborativeSeeds: collaborative?.supportingSeeds.length ?? 0,
+        underexposure: novelty.underexposure,
+        adjacency: novelty.adjacency,
+        explorationScore: exploration.diagnostics.get(project.id)?.explorationScore ?? 0,
       },
     };
   });
 
-  // 5. Hybrid rank with weights renormalised over the components this user has.
+  // 6. Exploration-aware hybrid rank with weights renormalised over the components this user has.
   const components = resolveAvailableComponents({ profileEmpty, collaborativeAvailable });
-  const weights = resolveRankingWeights(components, { coldStart });
+  const weights = resolveRankingWeights(components, { coldStart, explorationPreference });
   const ranked = rankCandidates(rankingInputs, { weights });
-  const top = ranked.slice(0, limit);
 
-  // 6. Explain each surfaced recommendation from its actual signals.
-  const items: RecommendationItem[] = top.map((r) => {
+  // 7. Diversify (MMR + tag concentration) and take the final top-K.
+  const diversified: DiversifyResult<RankedCandidate> = diversifyRanked(ranked, {
+    limit,
+    explorationPreference,
+    projects: new Map(catalog.map((p) => [p.id, { vector: p.vector, tagSlugs: p.tagSlugs }])),
+  });
+
+  // 8. Explain each surfaced recommendation from its actual signals.
+  const items: RecommendationItem[] = diversified.selected.map((entry) => {
+    const r = entry.item;
     const project = projectById.get(r.projectId)!;
     const sessionAffinity = profile.session.norm > 0 ? cosineSimilarity(profile.session.vector, project.vector) : null;
     const evidence = collaborativeScoring.scores.get(r.projectId) ?? null;
@@ -242,6 +317,7 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       state: s.state,
       contribution: s.contribution,
     }));
+    const novelty = noveltyByProject.get(r.projectId)!;
     const explanation = explainRecommendation({
       project,
       longTerm: profile.longTerm,
@@ -255,9 +331,12 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       collaborativeScore: r.breakdown.collaborative,
       collaborativeSeeds: seedReferences,
       weights: r.weights,
+      novelty,
+      explorationPreference,
     });
     return {
-      rank: r.rank,
+      rank: entry.finalRank,
+      preDiversificationRank: entry.preDiversificationRank,
       projectId: r.projectId,
       slug: r.slug,
       score: r.score,
@@ -270,6 +349,13 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
       collaborative: evidence
         ? { score: evidence.score, rawEvidence: evidence.rawEvidence, confidence: collaborativeScoring.confidence, seeds: seedViews }
         : null,
+      novelty,
+      exploration: exploration.diagnostics.get(r.projectId) ?? null,
+      diversification: {
+        mmrScore: entry.mmrScore,
+        maxSimilarityToSelected: entry.maxSimilarityToSelected,
+        admittedUnderRelaxation: entry.admittedUnderRelaxation,
+      },
     };
   });
 
@@ -277,10 +363,12 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
     contentCandidates: countBySource(candidateSets, "content"),
     collaborativeCandidates: countBySource(candidateSets, "collaborative"),
     popularCandidates: countBySource(candidateSets, "popular"),
-    explorationCandidates: 0,
+    explorationCandidates: countBySource(candidateSets, "exploration"),
     uniqueCandidates: merged.length,
     afterFiltering: kept.length,
     ranked: ranked.length,
+    preDiversificationCandidates: ranked.length,
+    diversifiedCandidates: diversified.selected.length,
     final: items.length,
   };
 
@@ -302,6 +390,18 @@ export function runRecommendationPipeline(input: RecommendationPipelineInput): R
         candidatesWithEvidence: collaborativeScoring.scores.size,
         modelUsers: collaborativeModel.userCount,
         modelItems: collaborativeModel.itemCount,
+      },
+      exploration: {
+        preference: explorationPreference,
+        mode: discoveryMode(explorationPreference),
+        candidateLimit: exploration.limit,
+      },
+      diversification: {
+        applied: diversified.applied,
+        lambda: diversified.lambda,
+        maxTagShare: diversified.maxTagShare,
+        maxPerTag: diversified.maxPerTag,
+        relaxationLevel: diversified.relaxationLevel,
       },
       components,
     },

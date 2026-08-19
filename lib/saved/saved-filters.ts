@@ -12,7 +12,7 @@ import type { ProjectSummary } from "@/lib/catalog/queries";
 import { DIFFICULTY_ORDER } from "@/lib/format";
 import { durationBucketForHours } from "@/lib/recommender/features";
 
-export const SAVED_SORTS = ["recent", "match", "shortest", "difficulty"] as const;
+export const SAVED_SORTS = ["recent", "match", "shortest", "difficulty", "adventurous"] as const;
 export type SavedSort = (typeof SAVED_SORTS)[number];
 
 export interface SavedProjectItem {
@@ -20,6 +20,8 @@ export interface SavedProjectItem {
   savedAt: Date;
   /** Cosine match with the user's effective profile (0 when the profile is empty). */
   matchScore: number;
+  /** Novelty from lib/recommender/novelty.ts (underexposure + adjacency), in [0, 1]. */
+  noveltyScore: number;
   built: boolean;
   completed: boolean;
 }
@@ -56,6 +58,9 @@ export function sortSavedProjects(items: readonly SavedProjectItem[], sort: Save
       break;
     case "difficulty":
       sorted.sort((a, b) => DIFFICULTY_ORDER[a.project.difficulty] - DIFFICULTY_ORDER[b.project.difficulty] || recency(a, b));
+      break;
+    case "adventurous":
+      sorted.sort((a, b) => b.noveltyScore - a.noveltyScore || recency(a, b));
       break;
     case "recent":
     default:

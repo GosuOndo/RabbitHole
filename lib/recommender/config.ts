@@ -161,6 +161,12 @@ export const RECOMMENDER_CONFIG = {
     minPopularity: 0.5,
     /** Collaborative score needed before "people who liked … also liked this" is claimed. */
     minCollaborative: 0.3,
+    /** Novelty needed before exploration wording ("a bit of a wildcard…") is used. */
+    minNovelty: 0.55,
+    /** Underexposure needed to call a project "less commonly explored". */
+    minUnderexposure: 0.6,
+    /** Adjacency needed to call a project "an adjacent area". */
+    minAdjacency: 0.5,
     maxFeaturesPerSentence: 2,
   },
 
@@ -170,45 +176,97 @@ export const RECOMMENDER_CONFIG = {
   },
 
   /**
-   * Base ranking weights (sum to 1). Adjusted per request by the user's
-   * exploration preference (see `exploration.weightSlopes`).
-   *   finalScore = Σ weight[c] * normalisedScore[c]
+   * Base ranking weights at exploration preference 0 (Familiar). Per request
+   * they are shifted by `exploration.weightSlopes × preference`, clamped at 0
+   * and renormalised over the components available for the user, so they do
+   * not need to sum to 1 here (`session` is unused until Phase 6).
+   *   score = Σ weight[c] * normalisedScore[c]
    */
   rankingWeights: {
     content: 0.45,
     collaborative: 0.25,
     session: 0.1,
-    novelty: 0.1,
+    novelty: 0.05,
     popularity: 0.1,
   } satisfies RankingWeights,
 
-  /** Exploration ↔ exploitation control (0 = familiar, 1 = adventurous). */
+  /**
+   * Exploration ↔ exploitation control (0 = familiar, 1 = adventurous).
+   *
+   * Ranking weights move linearly with the preference `e`:
+   *   weight[c] = max(0, rankingWeights[c] + weightSlopes[c] * e)
+   * i.e. content 0.45 → 0.30, collaborative 0.25 → 0.20, novelty 0.05 → 0.35,
+   * popularity 0.10 → 0.10 between Familiar and Adventurous (before
+   * renormalisation over available components).
+   */
   exploration: {
     defaultPreference: 0.35,
     minPreference: 0,
     maxPreference: 1,
-    /**
-     * Ranking weights are shifted linearly around `weightPivot`:
-     *   weight[c] = base[c] + slope[c] * (preference - weightPivot)
-     * then clamped at 0 and renormalised to sum to 1. At preference = 1 the
-     * novelty weight therefore rises by ~0.125 while content/collaborative fall.
-     */
-    weightPivot: 0.5,
     weightSlopes: {
-      content: -0.2,
-      collaborative: -0.1,
+      content: -0.15,
+      collaborative: -0.05,
       session: 0,
-      novelty: 0.25,
-      popularity: 0.05,
+      novelty: 0.3,
+      popularity: 0,
     } satisfies RankingWeights,
+    /**
+     * Exploration retrieval:
+     *   plausibility     = max(positive content affinity, collaborative score)  (popularity when neither exists)
+     *   explorationScore = (1 - e) * plausibility + e * (noveltyWeight * novelty + plausibilityWeight * plausibility)
+     *   limit            = round(minCandidates + e * (maxCandidates - minCandidates))
+     */
+    retrieval: {
+      minCandidates: 8,
+      maxCandidates: 15,
+      /** Candidates need at least this much plausibility to count as exploration (never random). */
+      minPlausibility: 0.05,
+      noveltyWeight: 0.65,
+      plausibilityWeight: 0.35,
+    },
+    /** Preference at or above which explanations may mention "adventurous discovery mode". */
+    adventurousThreshold: 0.6,
+    /** Preference labels for the UI. */
+    labels: { familiarMax: 0.3, adventurousMin: 0.7 },
   },
 
-  /** Post-ranking diversification (maximal-marginal-relevance style). */
+  /**
+   * Novelty (a ranking feature in [0, 1], computed for every candidate):
+   *   underexposure = 1 - popularityScore
+   *   adjacency     = 4 · x · (1 - x)   with x = clamp01(contentAffinity)  (negative affinity → 0)
+   *   novelty       = underexposureWeight · underexposure + adjacencyWeight · adjacency
+   */
+  novelty: {
+    underexposureWeight: 0.65,
+    adjacencyWeight: 0.35,
+  },
+
+  /**
+   * Post-ranking diversification (maximal marginal relevance):
+   *   mmr(c) = lambda · relevance(c) − (1 − lambda) · maxSimilarityToSelected(c)
+   *   lambda = clamp(lambdaBase + lambdaSlope · e, lambdaMin, lambdaMax)
+   * plus a soft tag-share cap:
+   *   maxTagShare = tagShareBase + tagShareSlope · e   (per tag, of the requested limit; at least minTagCount)
+   * that is relaxed deterministically when the pool is too narrow to fill the list.
+   */
   diversity: {
-    /** diversifiedScore = relevance - lambda * maxSimilarityToSelected */
-    lambda: 0.3,
-    /** Hard cap on results sharing the same dominant tag in the final list. */
-    maxItemsPerDominantTag: 3,
+    lambdaBase: 0.9,
+    lambdaSlope: -0.2,
+    lambdaMin: 0.5,
+    lambdaMax: 0.95,
+    /** Project-project cosine at or above which items are treated as near-duplicates. */
+    nearDuplicateSimilarity: 0.9,
+    tagShareBase: 0.45,
+    tagShareSlope: -0.15,
+    minTagCount: 2,
+    /**
+     * Relevance band: at each pick only candidates whose recommendation score is
+     * at least this fraction of the best remaining score can be chosen, so
+     * diversity re-orders comparably good projects but never lifts a much
+     * weaker one. Constraints (tag cap, near-duplicates) are relaxed for a pick
+     * when no band candidate satisfies them.
+     */
+    alternativeQualityRatio: 0.8,
     /** Lists shorter than this are returned unchanged. */
     minListLengthToDiversify: 3,
   },

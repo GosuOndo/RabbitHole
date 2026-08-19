@@ -54,20 +54,38 @@ export interface RankedCandidate {
 
 export interface ResolveWeightsOptions {
   base?: RankingWeights;
+  /** Per-unit-of-preference change of each weight (defaults to RECOMMENDER_CONFIG.exploration.weightSlopes). */
+  slopes?: RankingWeights;
+  /** Exploration preference in [0, 1]; omitted = 0 (Familiar). */
+  explorationPreference?: number;
   coldStart?: boolean;
   coldStartPopularityMultiplier?: number;
 }
 
-/** Restricts base weights to the available components and renormalises them to sum to 1. */
-export function resolveRankingWeights(components: readonly ScoreComponent[], options: ResolveWeightsOptions = {}): Partial<RankingWeights> {
+/**
+ * Raw (un-normalised) weight of one component for a preference `e`:
+ *   max(0, base[c] + slope[c] · e), popularity additionally × multiplier for cold-start users.
+ */
+export function rawRankingWeight(component: ScoreComponent, options: ResolveWeightsOptions = {}): number {
   const base = options.base ?? RECOMMENDER_CONFIG.rankingWeights;
+  const slopes = options.slopes ?? RECOMMENDER_CONFIG.exploration.weightSlopes;
   const multiplier = options.coldStartPopularityMultiplier ?? RECOMMENDER_CONFIG.coldStart.popularityWeightMultiplier;
+  const e = Math.max(0, Math.min(1, Number.isFinite(options.explorationPreference ?? 0) ? (options.explorationPreference ?? 0) : 0));
+  let weight = Math.max(0, base[component] + slopes[component] * e);
+  if (options.coldStart && component === "popularity") weight *= multiplier;
+  return weight;
+}
+
+/**
+ * Restricts the exploration-adjusted weights to the available components and
+ * renormalises them to sum to 1 (equal weights if everything is zero).
+ */
+export function resolveRankingWeights(components: readonly ScoreComponent[], options: ResolveWeightsOptions = {}): Partial<RankingWeights> {
   const unique = [...new Set(components)];
   const raw: Partial<RankingWeights> = {};
   let total = 0;
   for (const component of unique) {
-    let weight = Math.max(0, base[component]);
-    if (options.coldStart && component === "popularity") weight *= multiplier;
+    const weight = rawRankingWeight(component, options);
     raw[component] = weight;
     total += weight;
   }

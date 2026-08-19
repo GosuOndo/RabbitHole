@@ -16,9 +16,15 @@
  *      liked this."                                     the candidate is a behavioural
  *                                                        neighbour of the user's own
  *                                                        positive-state projects (seeds)
+ *   - "A bit of a wildcard: this explores an adjacent   novelty ≥ threshold with real
+ *      area while still matching your systems            adjacency / underexposure and a
+ *      interests."                                       non-negative content affinity;
+ *                                                        "adventurous mode" wording only
+ *                                                        when the preference is high
  * Collaborative wording is only produced when real seeds support the candidate;
  * it becomes the primary sentence when its weighted contribution exceeds the
- * content contribution, otherwise it is a secondary sentence. Templates are
+ * content contribution, otherwise it is a secondary sentence. Novelty wording
+ * likewise leads only when the novelty contribution dominates. Templates are
  * chosen by a fixed precedence, so the same inputs always yield the same text.
  * Factors are returned as data for the inspector UI.
  */
@@ -27,10 +33,11 @@ import type { Difficulty, DurationPreference } from "@/generated/prisma/enums";
 import type { CollaborativeSeedState } from "./collaborative";
 import { RECOMMENDER_CONFIG } from "./config";
 import { durationBucketForHours, featureId, type FeatureFamily } from "./features";
+import type { NoveltyBreakdown } from "./novelty";
 import type { InterestProfile } from "./profile";
 import type { CandidateSource, RankingWeights } from "./types";
 
-export type ExplanationFactorKind = "onboarding" | "taste" | "session" | "collaborative" | "fit" | "popularity" | "catalog";
+export type ExplanationFactorKind = "onboarding" | "taste" | "session" | "collaborative" | "novelty" | "fit" | "popularity" | "catalog";
 
 export interface ExplanationFeature {
   id: string;
@@ -67,8 +74,12 @@ export interface ExplanationInput {
   collaborativeScore?: number | null;
   /** The user's own positive-state projects that support the collaborative score, strongest first. */
   collaborativeSeeds?: readonly CollaborativeSeedReference[];
-  /** Ranking weights in force (decides whether collaborative or content wording leads). */
+  /** Ranking weights in force (decides whether collaborative / novelty or content wording leads). */
   weights?: Partial<RankingWeights>;
+  /** Novelty breakdown for this candidate (underexposure / adjacency). */
+  novelty?: NoveltyBreakdown;
+  /** The user's persisted exploration preference in [0, 1]. */
+  explorationPreference?: number;
 }
 
 export interface CollaborativeSeedReference {
@@ -204,7 +215,38 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
   const collaborativeContribution = collaborativeSupported ? (input.weights?.collaborative ?? 0) * collaborativeScore : 0;
   const collaborativeLeads = collaborativeSupported && (!tasteSupported || collaborativeContribution > contentContribution);
 
-  // Fixed precedence: collaborative (when it dominates) → taste/onboarding → session → fit → popularity → catalog.
+  // Novelty / exploration: only for genuinely novel, non-disliked candidates, and never on
+  // popularity alone — either an adjacent topic or real underexposure must back it.
+  const novelty = input.novelty ?? null;
+  const explorationPreference = input.explorationPreference ?? 0;
+  const anyPositiveTag = positiveTagOverlap(longTerm, project.tagSlugs, 1)[0] ?? null;
+  const noveltyTag = tasteFeatures[0] ?? (anyPositiveTag ? { id: featureId("tag", anyPositiveTag.slug), label: labelFor("tag", anyPositiveTag.slug) } : null);
+  const adjacencyReason = novelty !== null && novelty.adjacency >= config.minAdjacency && noveltyTag !== null;
+  const underexposureReason = novelty !== null && novelty.underexposure >= config.minUnderexposure;
+  const noveltySupported =
+    novelty !== null && novelty.novelty >= config.minNovelty && input.contentAffinity >= 0 && (adjacencyReason || underexposureReason);
+  if (noveltySupported) {
+    factors.push({ kind: "novelty", features: noveltyTag ? [noveltyTag] : [], strength: novelty.novelty });
+  }
+  const noveltyContribution = noveltySupported ? (input.weights?.novelty ?? 0) * novelty.novelty : 0;
+  const noveltyLeads =
+    noveltySupported && noveltyContribution > contentContribution && noveltyContribution > collaborativeContribution && !(tasteSupported && input.coldStart);
+  const adventurous = explorationPreference >= RECOMMENDER_CONFIG.exploration.adventurousThreshold && input.sources.includes("exploration");
+  let noveltyText = "";
+  if (noveltySupported) {
+    const tagLabel = noveltyTag ? proseLabel(noveltyTag.label) : null;
+    if (adventurous && tagLabel) {
+      noveltyText = `You're in a more adventurous discovery mode, so RabbitHole is showing a less familiar project related to ${tagLabel}.`;
+    } else if (adjacencyReason && tagLabel) {
+      noveltyText = `A bit of a wildcard: this explores an adjacent area while still matching your ${tagLabel} interests.`;
+    } else if (underexposureReason && tagLabel) {
+      noveltyText = `This is less commonly explored, but still overlaps with your interest in ${tagLabel}.`;
+    } else {
+      noveltyText = "Less commonly explored than the usual popular picks.";
+    }
+  }
+
+  // Fixed precedence: collaborative / novelty (when they dominate) → taste/onboarding → session → fit → popularity → catalog.
   const tagProse = joinNatural(tasteFeatures.map((f) => proseLabel(f.label)));
   const sessionProse = joinNatural(sessionTags.map((t) => proseLabel(labelFor("tag", t.slug))));
   const fitSentence = `Fits your preference for ${fitParts.join(" ")} projects.`;
@@ -212,20 +254,28 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
 
   let text: string;
   let primary: ExplanationFactorKind;
-  if (collaborativeLeads) {
+  if (collaborativeLeads && collaborativeContribution >= noveltyContribution) {
     primary = "collaborative";
     text = collaborativeText;
     if (tasteSupported) text += ` It also matches your interest in ${tagProse}.`;
+    else if (noveltySupported) text += ` ${noveltyText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
+  } else if (noveltyLeads) {
+    primary = "novelty";
+    text = noveltyText;
+    if (tasteSupported && !noveltyText.includes("interest")) text += ` It matches your interest in ${tagProse}.`;
+    else if (collaborativeSupported) text += ` ${collaborativeText}`;
   } else if (tasteSupported && input.coldStart) {
     primary = "onboarding";
     text = `Based on the interests you selected during onboarding: ${tagProse}.`;
-    if (fitSupported) text += ` ${fitSentence}`;
+    if (noveltySupported && input.sources.includes("exploration")) text += ` ${noveltyText}`;
+    else if (fitSupported) text += ` ${fitSentence}`;
   } else if (tasteSupported) {
     primary = "taste";
     text = `Because you like ${tagProse} projects.`;
     if (sessionSupported) text += ` You've also been exploring ${sessionProse} this session.`;
     else if (collaborativeSupported) text += ` ${collaborativeText}`;
+    else if (noveltySupported && input.sources.includes("exploration")) text += ` ${noveltyText}`;
     else if (fitSupported) text += ` ${fitSentence}`;
   } else if (sessionSupported) {
     primary = "session";
@@ -233,6 +283,9 @@ export function explainRecommendation(input: ExplanationInput, config = RECOMMEN
   } else if (fitSupported) {
     primary = "fit";
     text = fitSentence;
+  } else if (noveltySupported && input.sources.includes("exploration")) {
+    primary = "novelty";
+    text = noveltyText;
   } else if (popularitySupported) {
     primary = "popularity";
     const related = tasteFeatures[0] ? `, and related to your interest in ${proseLabel(tasteFeatures[0].label)}.` : " — a good place to start.";

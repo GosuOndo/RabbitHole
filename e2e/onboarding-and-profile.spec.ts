@@ -80,6 +80,35 @@ test.describe("onboarding", () => {
     }
   });
 
+  test("a cold-start (onboarding-only) user gets relevant recommendations in every discovery mode", async ({ request }) => {
+    const original = (await fetchProfile(request)).user.explorationPreference;
+    try {
+      const feeds: Record<string, { items: { project: { id: string }; sources: string[]; breakdown: { content: number | null; collaborative: number | null; novelty: number | null } }[]; context: { coldStart: boolean; components: string[]; exploration: { mode: string } }; pipeline: { explorationCandidates: number } }> = {};
+      for (const value of [0, 1]) {
+        const patch = await request.patch("/api/profile", { data: { explorationPreference: value } });
+        expect(patch.ok()).toBe(true);
+        feeds[value] = await (await request.get("/api/recommendations?limit=10")).json();
+      }
+      for (const feed of Object.values(feeds)) {
+        expect(feed.items.length).toBeGreaterThanOrEqual(5);
+        expect(feed.context.coldStart).toBe(true);
+        expect(feed.context.components).toEqual(["content", "novelty", "popularity"]);
+        expect(feed.pipeline.explorationCandidates).toBeGreaterThan(0);
+        for (const item of feed.items) {
+          expect(item.breakdown.collaborative).toBeNull();
+          expect(item.breakdown.novelty).not.toBeNull();
+          expect(item.breakdown.content).toBeGreaterThan(0); // onboarding taste is never abandoned
+        }
+      }
+      expect(feeds[0]!.context.exploration.mode).toBe("familiar");
+      expect(feeds[1]!.context.exploration.mode).toBe("adventurous");
+      expect(feeds[0]!.items.map((i) => i.project.id)).not.toEqual(feeds[1]!.items.map((i) => i.project.id));
+    } finally {
+      const restore = await request.patch("/api/profile", { data: { explorationPreference: original } });
+      expect(restore.ok()).toBe(true);
+    }
+  });
+
   test("onboarding persists after reload and seeds the long-term profile", async ({ page, request }) => {
     await page.goto("/");
     await expect(page).toHaveURL(/\/discover$/);

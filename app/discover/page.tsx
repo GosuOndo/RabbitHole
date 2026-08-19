@@ -6,6 +6,7 @@ import { RecommendationFeed } from "@/components/recommendation-feed";
 import { isDatabaseConfigured } from "@/lib/db";
 import { getOrCreateDemoUser } from "@/lib/demo-user";
 import { getRecommendationFeed } from "@/lib/recommendations/recommendation-service";
+import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
 
 export const metadata: Metadata = { title: "Discover" };
 export const dynamic = "force-dynamic";
@@ -29,9 +30,9 @@ export default async function DiscoverPage() {
       <PageHeader
         eyebrow="Discover"
         title="What should you build next?"
-        description="Ranked by how well each project matches your taste profile. Scores are match scores, not probabilities — open “Why?” on any card to see the signals."
+        description="Ranked by how well each project matches your taste, then lightly diversified. Scores are match scores, not probabilities — open “Why?” on any card to see the signals, and use Discovery mode to lean familiar or adventurous."
       />
-      <RecommendationFeed initial={feed} />
+      <RecommendationFeed initial={feed} explorationLabels={RECOMMENDER_CONFIG.exploration.labels} />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
 import { rankCandidates, resolveRankingWeights, type RankingInput } from "@/lib/recommender/rank";
+import type { ScoreComponent } from "@/lib/recommender/types";
 
 const base = RECOMMENDER_CONFIG.rankingWeights;
 
@@ -81,6 +82,68 @@ describe("rankCandidates", () => {
     expect(ranked.find((r) => r.projectId === "negative")!.score).toBe(0);
     // Non-finite signals are neutralised to 0 rather than clamped or propagated.
     expect(ranked.find((r) => r.projectId === "broken")!.breakdown).toEqual({ content: 0, collaborative: null, session: null, novelty: null, popularity: 0 });
+  });
+});
+
+describe("exploration-aware ranking weights", () => {
+  const all: ScoreComponent[] = ["content", "collaborative", "novelty", "popularity"];
+  const at = (e: number) => resolveRankingWeights(all, { explorationPreference: e });
+
+  it("moves weight from content/collaborative to novelty as the preference rises, keeping popularity sensible", () => {
+    const familiar = at(0);
+    const balanced = at(0.35);
+    const adventurous = at(1);
+    // Raw policy: content 0.45→0.30, collaborative 0.25→0.20, novelty 0.05→0.35, popularity 0.10 (renormalised).
+    expect(familiar.content).toBeCloseTo(0.45 / 0.85, 4);
+    expect(familiar.novelty).toBeCloseTo(0.05 / 0.85, 4);
+    expect(adventurous.content).toBeCloseTo(0.3 / 0.95, 4);
+    expect(adventurous.collaborative).toBeCloseTo(0.2 / 0.95, 4);
+    expect(adventurous.novelty).toBeCloseTo(0.35 / 0.95, 4);
+    expect(adventurous.popularity).toBeCloseTo(0.1 / 0.95, 4);
+    expect(balanced.content!).toBeLessThan(familiar.content!);
+    expect(balanced.content!).toBeGreaterThan(adventurous.content!);
+    expect(balanced.collaborative!).toBeLessThan(familiar.collaborative!);
+    expect(balanced.novelty!).toBeGreaterThan(familiar.novelty!);
+    expect(balanced.novelty!).toBeLessThan(adventurous.novelty!);
+    for (const w of [familiar, balanced, adventurous]) {
+      expect(Object.values(w).reduce((s, v) => s + (v ?? 0), 0)).toBeCloseTo(1, 10);
+      expect(w.popularity!).toBeGreaterThan(0.05);
+      expect(w.popularity!).toBeLessThan(0.2);
+    }
+  });
+
+  it("keeps the cold-start popularity boost and renormalises over available components", () => {
+    const cold = resolveRankingWeights(all, { explorationPreference: 0.35, coldStart: true });
+    const warm = at(0.35);
+    expect(cold.popularity!).toBeGreaterThan(warm.popularity!);
+    expect(cold.popularity).toBeCloseTo(0.3 / (0.45 - 0.15 * 0.35 + 0.25 - 0.05 * 0.35 + 0.05 + 0.3 * 0.35 + 0.3), 6);
+    const noCollab = resolveRankingWeights(["content", "novelty", "popularity"], { explorationPreference: 1 });
+    expect(noCollab.collaborative).toBeUndefined();
+    expect(Object.values(noCollab).reduce((s, v) => s + (v ?? 0), 0)).toBeCloseTo(1, 10);
+    const noProfile = resolveRankingWeights(["novelty", "popularity"], { explorationPreference: 1 });
+    expect(noProfile.novelty).toBeCloseTo(0.35 / 0.45, 6);
+  });
+
+  it("scores with novelty as a real component while staying finite, bounded and deterministic", () => {
+    const weights = at(1);
+    const inputs: RankingInput[] = [
+      { projectId: "novel", slug: "novel", popularityPrior: 0.2, sources: ["exploration"], signals: { content: 0.4, novelty: 0.9, popularity: 0.2 } },
+      { projectId: "safe", slug: "safe", popularityPrior: 0.9, sources: ["content"], signals: { content: 0.6, novelty: 0.1, popularity: 0.9 } },
+      { projectId: "saved", slug: "saved", popularityPrior: 0.5, sources: ["content"], signals: { content: 0.7, novelty: 0.5, popularity: 0.5 }, saved: true },
+    ];
+    const ranked = rankCandidates(inputs, { weights });
+    expect(ranked[0]!.projectId).toBe("novel");
+    expect(ranked.find((r) => r.projectId === "novel")!.breakdown.novelty).toBe(0.9);
+    const familiarRanked = rankCandidates(inputs, { weights: at(0) });
+    expect(familiarRanked[0]!.projectId).toBe("safe");
+    const savedEntry = ranked.find((r) => r.projectId === "saved")!;
+    expect(savedEntry.savedMultiplierApplied).toBe(true);
+    for (const r of ranked) {
+      expect(Number.isFinite(r.score)).toBe(true);
+      expect(r.score).toBeGreaterThanOrEqual(0);
+      expect(r.score).toBeLessThanOrEqual(1);
+    }
+    expect(rankCandidates(inputs, { weights })).toEqual(ranked);
   });
 });
 

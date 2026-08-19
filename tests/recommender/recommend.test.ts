@@ -54,10 +54,14 @@ describe("runRecommendationPipeline", () => {
     const ids = new Set(output.items.map((i) => i.projectId));
     for (const id of excluded) expect(ids.has(id)).toBe(false);
     expect(ids.has("write-an-http-server")).toBe(true);
-    // Saved projects stay eligible but are demoted.
-    const redis = output.items.find((i) => i.projectId === "build-your-own-redis");
-    expect(redis?.saved).toBe(true);
     expect(output.pipeline.afterFiltering).toBe(output.pipeline.uniqueCandidates);
+    // Saved projects stay eligible but are demoted (score × 0.6 with everything else equal).
+    const withoutSave = run(profileInput(longTerm, { excludedProjectIds: excluded }), 100);
+    const withSave = run(profileInput(longTerm, { excludedProjectIds: excluded, savedProjectIds: new Set(["build-your-own-redis"]) }), 100);
+    const plain = withoutSave.items.find((i) => i.projectId === "build-your-own-redis")!;
+    const demoted = withSave.items.find((i) => i.projectId === "build-your-own-redis")!;
+    expect(demoted.saved).toBe(true);
+    expect(demoted.score).toBeCloseTo(plain.score * RECOMMENDER_CONFIG.filtering.savedProjectScoreMultiplier, 10);
   });
 
   it("gives a brand-new onboarded user personalised recommendations, not just the popularity list", () => {
@@ -157,18 +161,20 @@ describe("hybrid pipeline with collaborative filtering", () => {
     expect(output.context.collaborative.available).toBe(true);
     expect(output.context.collaborative.seedCount).toBe(3);
     expect(output.context.coldStart).toBe(false);
-    expect(output.context.components).toEqual(["content", "collaborative", "popularity"]);
+    expect(output.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    // Familiar (e = 0): 0.45 / 0.25 / 0.05 / 0.10 renormalised over the four available components.
     const [first] = output.items;
-    expect(first!.weights.content).toBeCloseTo(0.5625, 4);
-    expect(first!.weights.collaborative).toBeCloseTo(0.3125, 4);
-    expect(first!.weights.popularity).toBeCloseTo(0.125, 4);
+    expect(first!.weights.content).toBeCloseTo(0.45 / 0.85, 4);
+    expect(first!.weights.collaborative).toBeCloseTo(0.25 / 0.85, 4);
+    expect(first!.weights.novelty).toBeCloseTo(0.05 / 0.85, 4);
+    expect(first!.weights.popularity).toBeCloseTo(0.1 / 0.85, 4);
     // A cold-start user with seeds keeps the popularity boost but still gets the collaborative component.
     const cold = run(profileInput(behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "SAVE" }]))), 10, noEvidence, systemsHistory);
     expect(cold.context.coldStart).toBe(true);
-    expect(cold.context.components).toEqual(["content", "collaborative", "popularity"]);
-    expect(cold.items[0]!.weights.popularity).toBeCloseTo(0.3, 4);
-    expect(cold.items[0]!.weights.content).toBeCloseTo(0.45, 4);
-    expect(cold.items[0]!.weights.collaborative).toBeCloseTo(0.25, 4);
+    expect(cold.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    expect(cold.items[0]!.weights.popularity).toBeCloseTo(0.3 / 1.05, 4);
+    expect(cold.items[0]!.weights.content).toBeCloseTo(0.45 / 1.05, 4);
+    expect(cold.items[0]!.weights.collaborative).toBeCloseTo(0.25 / 1.05, 4);
     const collaborativeItems = output.items.filter((i) => i.sources.includes("collaborative"));
     expect(collaborativeItems.length).toBeGreaterThan(0);
     for (const item of collaborativeItems) {
@@ -191,7 +197,7 @@ describe("hybrid pipeline with collaborative filtering", () => {
     const output = run(profileInput(onboardingProfile(["systems", "databases"])), 10, noEvidence, rows);
     expect(output.pipeline.collaborativeCandidates).toBe(0);
     expect(output.context.collaborative).toMatchObject({ available: false, seedCount: 0, confidence: 0 });
-    expect(output.context.components).toEqual(["content", "popularity"]);
+    expect(output.context.components).toEqual(["content", "novelty", "popularity"]);
     for (const item of output.items) {
       expect(item.breakdown.collaborative).toBeNull();
       expect(item.sources).not.toContain("collaborative");
@@ -270,6 +276,155 @@ describe("hybrid pipeline with collaborative filtering", () => {
     const a = run(profileInput(longTerm), 10, noEvidence, systemsHistory);
     const b = run(profileInput(longTerm), 10, noEvidence, systemsHistory);
     expect(a.items.map((i) => [i.projectId, i.score, i.breakdown.collaborative])).toEqual(b.items.map((i) => [i.projectId, i.score, i.breakdown.collaborative]));
+  });
+});
+
+describe("exploration, novelty and diversification in the pipeline", () => {
+  const rows = clusterInteractions();
+  const behaviour = interactionsOn([
+    { slug: "build-your-own-redis", type: "SAVE" },
+    { slug: "write-an-http-server", type: "BUILD" },
+    { slug: "implement-a-tiny-database", type: "OPEN" },
+    { slug: "implement-a-dns-resolver", type: "SAVE" },
+  ]);
+  const history = [
+    ...rows,
+    ev("target", "build-your-own-redis", "SAVE"),
+    ev("target", "write-an-http-server", "BUILD"),
+    ev("target", "implement-a-tiny-database", "OPEN"),
+    ev("target", "implement-a-dns-resolver", "SAVE"),
+  ];
+  const evidence = new Map<string, number>(catalog.map((p) => [p.id, Math.round(p.popularity * 40)]));
+  const at = (e: number, limit = 10) =>
+    run(profileInput(behaviourProfile(behaviour), { explorationPreference: e, excludedProjectIds: new Set(["write-an-http-server"]) }), limit, evidence, history);
+  const mean = (values: number[]) => values.reduce((s, v) => s + v, 0) / Math.max(1, values.length);
+
+  it("adds exploration as a genuine fourth source with breadth that grows with the preference", () => {
+    const familiar = at(0);
+    const adventurous = at(1);
+    expect(familiar.pipeline.explorationCandidates).toBe(RECOMMENDER_CONFIG.exploration.retrieval.minCandidates);
+    expect(adventurous.pipeline.explorationCandidates).toBe(RECOMMENDER_CONFIG.exploration.retrieval.maxCandidates);
+    expect(familiar.context.exploration).toMatchObject({ preference: 0, mode: "familiar", candidateLimit: 8 });
+    expect(adventurous.context.exploration).toMatchObject({ preference: 1, mode: "adventurous", candidateLimit: 15 });
+    expect(familiar.context.components).toEqual(["content", "collaborative", "novelty", "popularity"]);
+    for (const item of [...familiar.items, ...adventurous.items]) {
+      expect(item.breakdown.novelty).not.toBeNull();
+      expect(item.novelty.novelty).toBeGreaterThanOrEqual(0);
+      expect(item.novelty.novelty).toBeLessThanOrEqual(1);
+      if (item.sources.includes("exploration")) {
+        expect(item.exploration).not.toBeNull();
+        expect(item.exploration!.plausibility).toBeGreaterThanOrEqual(RECOMMENDER_CONFIG.exploration.retrieval.minPlausibility);
+      } else {
+        expect(item.exploration).toBeNull();
+      }
+    }
+  });
+
+  it("changes ranking weights, novelty and composition between Familiar and Adventurous while staying relevant", () => {
+    const familiar = at(0);
+    const adventurous = at(1);
+    expect(familiar.items[0]!.weights.novelty!).toBeLessThan(adventurous.items[0]!.weights.novelty!);
+    expect(familiar.items[0]!.weights.content!).toBeGreaterThan(adventurous.items[0]!.weights.content!);
+    const familiarIds = new Set(familiar.items.map((i) => i.projectId));
+    const adventurousIds = new Set(adventurous.items.map((i) => i.projectId));
+    const overlap = [...familiarIds].filter((id) => adventurousIds.has(id)).length;
+    expect(overlap).toBeLessThan(10);
+    expect(mean(adventurous.items.map((i) => i.novelty.novelty))).toBeGreaterThan(mean(familiar.items.map((i) => i.novelty.novelty)));
+    expect(mean(familiar.items.map((i) => i.breakdown.content ?? 0))).toBeGreaterThanOrEqual(mean(adventurous.items.map((i) => i.breakdown.content ?? 0)));
+    // Adventurous picks remain plausible: every item keeps a positive content affinity or collaborative evidence.
+    for (const item of adventurous.items) {
+      expect((item.breakdown.content ?? 0) > 0 || (item.breakdown.collaborative ?? 0) > 0).toBe(true);
+    }
+    const uniqueTags = (items: typeof familiar.items) => new Set(items.flatMap((i) => projectBySlug(i.projectId).tagSlugs)).size;
+    expect(uniqueTags(adventurous.items)).toBeGreaterThanOrEqual(uniqueTags(familiar.items));
+  });
+
+  it("diversifies after ranking: preserves the top item, records pre/final ranks, keeps scores and never duplicates", () => {
+    const output = at(0.35);
+    expect(output.items[0]!.preDiversificationRank).toBe(1);
+    expect(output.items[0]!.rank).toBe(1);
+    expect(output.items.some((i) => i.rank !== i.preDiversificationRank)).toBe(true);
+    expect(new Set(output.items.map((i) => i.projectId)).size).toBe(output.items.length);
+    expect(output.pipeline.preDiversificationCandidates).toBe(output.pipeline.ranked);
+    expect(output.pipeline.diversifiedCandidates).toBe(output.items.length);
+    expect(output.context.diversification.applied).toBe(true);
+    expect(output.context.diversification.lambda).toBeCloseTo(0.83, 6);
+    // Recommendation scores are the hybrid scores (unchanged by MMR); mmrScore is diagnostic only.
+    const byRank = [...output.items].sort((a, b) => a.preDiversificationRank - b.preDiversificationRank);
+    for (let i = 1; i < byRank.length; i++) expect(byRank[i - 1]!.score).toBeGreaterThanOrEqual(byRank[i]!.score);
+    for (const item of output.items) expect(item.diversification.mmrScore).toBeLessThanOrEqual(item.score);
+  });
+
+  it("keeps terminal exclusions and the collaborative confidence scaling intact under exploration", () => {
+    const sparse = [...rows, ev("target", "build-your-own-redis", "OPEN")];
+    const output = run(profileInput(behaviourProfile(interactionsOn([{ slug: "build-your-own-redis", type: "OPEN" }])), { explorationPreference: 1, excludedProjectIds: new Set(["implement-a-dns-resolver"]) }), 10, evidence, sparse);
+    expect(output.context.collaborative.confidence).toBeCloseTo(0.5 / RECOMMENDER_CONFIG.collaborative.fullConfidenceSeedWeight, 6);
+    expect(output.items.some((i) => i.projectId === "implement-a-dns-resolver")).toBe(false);
+    for (const item of output.items) if (item.breakdown.collaborative !== null) expect(item.breakdown.collaborative).toBeLessThanOrEqual(output.context.collaborative.confidence + 1e-9);
+  });
+
+  it("is deterministic for the same preference", () => {
+    const a = at(0.7);
+    const b = at(0.7);
+    expect(a.items.map((i) => [i.projectId, i.score, i.rank])).toEqual(b.items.map((i) => [i.projectId, i.score, i.rank]));
+  });
+});
+
+describe("cold start with exploration", () => {
+  const evidence = new Map<string, number>(catalog.map((p) => [p.id, Math.round(p.popularity * 40)]));
+  const rows = clusterInteractions();
+
+  it("onboarding-only user: content + popularity + exploration + novelty work and the preference changes the feed", () => {
+    const profile = onboardingProfile(["systems", "databases", "networking"], { difficulty: "ADVANCED", duration: "WEEKEND" });
+    const familiar = run(profileInput(profile, { explorationPreference: 0 }), 10, evidence, rows);
+    const adventurous = run(profileInput(profile, { explorationPreference: 1 }), 10, evidence, rows);
+    for (const output of [familiar, adventurous]) {
+      expect(output.context.collaborative.available).toBe(false);
+      expect(output.context.components).toEqual(["content", "novelty", "popularity"]);
+      expect(output.pipeline.explorationCandidates).toBeGreaterThan(0);
+      expect(output.items).toHaveLength(10);
+      expect(output.items.every((i) => i.breakdown.collaborative === null)).toBe(true);
+    }
+    expect(familiar.items.map((i) => i.projectId)).not.toEqual(adventurous.items.map((i) => i.projectId));
+    // Onboarding taste is not abandoned: adventurous items still overlap the chosen topics.
+    const onTopic = adventurous.items.filter((i) => projectBySlug(i.projectId).tagSlugs.some((t) => ["systems", "databases", "networking", "operating-systems", "distributed-systems", "concurrency"].includes(t))).length;
+    expect(onTopic).toBeGreaterThanOrEqual(6);
+  });
+
+  it("completely empty user: popularity + novelty with broader coverage as exploration rises", () => {
+    const familiar = run(profileInput(EMPTY_PROFILE, { explorationPreference: 0 }), 10, evidence, rows);
+    const adventurous = run(profileInput(EMPTY_PROFILE, { explorationPreference: 1 }), 10, evidence, rows);
+    for (const output of [familiar, adventurous]) {
+      expect(output.items).toHaveLength(10);
+      expect(output.context.profileEmpty).toBe(true);
+      expect(output.context.components).toEqual(["novelty", "popularity"]);
+      expect(output.items.every((i) => i.breakdown.content === null && i.breakdown.collaborative === null)).toBe(true);
+      expect(output.items.every((i) => !/Because you like|onboarding/.test(i.explanation.text))).toBe(true);
+    }
+    const uniqueTags = (items: typeof familiar.items) => new Set(items.flatMap((i) => projectBySlug(i.projectId).tagSlugs)).size;
+    const meanNovelty = (items: typeof familiar.items) => items.reduce((s, i) => s + i.novelty.novelty, 0) / items.length;
+    expect(uniqueTags(adventurous.items)).toBeGreaterThanOrEqual(uniqueTags(familiar.items));
+    expect(meanNovelty(adventurous.items)).toBeGreaterThan(meanNovelty(familiar.items));
+    // Familiar: mostly the reliable popular projects.
+    expect(familiar.items.every((i) => i.sources.includes("popular"))).toBe(true);
+  });
+
+  it("new project with no collaborative history remains recommendable through content/exploration", () => {
+    const profile = onboardingProfile(["distributed", "systems"], { chosen: ["implement-raft-consensus"] });
+    const withoutRaftEvidence = new Map(evidence);
+    withoutRaftEvidence.set("implement-raft-consensus", 0);
+    const output = run(profileInput(profile, { explorationPreference: 0.5 }), 40, withoutRaftEvidence, rows);
+    const raft = output.items.find((i) => i.projectId === "implement-raft-consensus");
+    expect(raft).toBeDefined();
+    expect(raft!.breakdown.collaborative).toBeNull();
+    expect(raft!.breakdown.content).toBeGreaterThan(0.5);
+    expect(raft!.preDiversificationRank).toBeLessThanOrEqual(15); // strong content/exploration signal despite zero popularity evidence
+    expect(raft!.sources.some((s) => s === "content" || s === "exploration")).toBe(true);
+    // Novelty alone must not carry an irrelevant rare project to the top.
+    const irrelevantRare = "barcode-pantry-inventory-app";
+    withoutRaftEvidence.set(irrelevantRare, 0);
+    const adventurous = run(profileInput(profile, { explorationPreference: 1 }), 10, withoutRaftEvidence, rows);
+    expect(adventurous.items.slice(0, 5).some((i) => i.projectId === irrelevantRare)).toBe(false);
   });
 });
 

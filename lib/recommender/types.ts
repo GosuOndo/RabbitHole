@@ -97,5 +97,9 @@ export interface PipelineStats {
   uniqueCandidates: number;
   afterFiltering: number;
   ranked: number;
+  /** Ranked candidates handed to the diversification stage. */
+  preDiversificationCandidates: number;
+  /** Candidates selected by diversification (before any hard limit — equals `final` today). */
+  diversifiedCandidates: number;
   final: number;
 }

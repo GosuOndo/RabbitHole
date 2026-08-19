@@ -96,14 +96,17 @@ npm start
 ## Recommendation architecture
 
 ```
-User → Interactions → User profile (long-term + session)
-     → Candidate retrieval: content (~50) + item-item collaborative (~30) + popularity (~15)
+User → Interactions → User profile (long-term + session) + exploration preference e ∈ [0, 1]
+     → Candidate retrieval: content (~50) + item-item collaborative (~30) + popularity (~15) + exploration (8–15, plausibility-anchored)
      → Merge (all sources kept) / dedupe / filter (DISLIKE · BUILD · COMPLETE never surface)
-     → Hybrid ranking (content · collaborative · popularity, weights renormalised over available signals)
+     → Hybrid ranking (content · collaborative · novelty · popularity; exploration-aware weights renormalised over available signals)
+     → MMR diversification (λ = 0.90 − 0.20e, near-duplicate and per-tag limits, relevance band) → final ranks
      → Top-K + deterministic explanations → impressions / feedback → updated recommendations
 ```
 
 Collaborative filtering in one paragraph: each user's *current state* per project (from `deriveProjectStates`) becomes a positive signal — `(completed ? 5 : built ? 4 : 0) + (saved ? 2 : 0) + (shared ? 3 : 0) + (opened ? 0.5 : 0)`, 0 when disliked, IMPRESSION never counts, each state counts once. Item vectors over users (target user left out) are compared with shrunk cosine `cos(v_i, v_j) × overlap / (overlap + 2)`; the user's positive projects seed retrieval, `evidence(c) = Σ sim(seed, c) × seedWeight`, normalised by the maximum and scaled by a sparse-history confidence `min(1, Σ seedWeight / 6)`; top 30 become collaborative candidates. Users without behavioural seeds simply have no collaborative component (content + popularity only) — nothing is fabricated.
+
+Exploration, novelty and diversification in one paragraph: the persisted `explorationPreference` `e` (Familiar 0 … Adventurous 1, default 0.35, `PATCH /api/profile`, the slider on `/discover`) drives three transparent mechanisms. **Novelty** `= 0.65 × underexposure + 0.35 × adjacency`, where `underexposure = 1 − popularityScore` and `adjacency = 4x(1 − x)` with `x = clamp01(contentAffinity)` (peaks for projects adjacent to the user's taste, 0 for perfect matches, for negative affinity and when no profile exists). **Exploration retrieval** is a fourth candidate source — `explorationScore = (1 − e)·plausibility + e·(0.65·novelty + 0.35·plausibility)`, plausibility = max(positive content affinity, collaborative evidence) or the popularity score when the user has neither — limited to `round(8 + 7e)` candidates with plausibility ≥ 0.05, so it is never random. **Exploration-aware weights**: `content 0.45 − 0.15e`, `collaborative 0.25 − 0.05e`, `novelty 0.05 + 0.30e`, `popularity 0.10` (×3 for cold start), renormalised over the components that exist for the user; the match score stays `clamp01(Σ weight·signal)`. **Diversification** re-orders the ranked list with MMR: each pick maximises `λ·score − (1 − λ)·maxSimilarityToSelected` (project-project cosine) among candidates within 80 % of the best remaining score, skipping near-duplicates (cosine ≥ 0.9) and projects that would push a tag over `max(2, round((0.45 − 0.15e) × limit))` slots; constraints relax when nothing else qualifies, and scores are never changed — `preDiversificationRank` vs `rank` and the MMR score are reported as diagnostics only.
 
 Layering: React/UI → API routes → services (`lib/sessions`, `lib/interactions`, `lib/onboarding`, `lib/profile`) → pure recommender functions (`lib/recommender`) → Prisma (`lib/db.ts`).
 
@@ -116,11 +119,14 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 - `lib/recommender/session.ts` — effective profile = fixed blend of long-term and session vectors (`session.baseWeight`; adaptive weighting comes in Phase 6).
 - `lib/recommender/content.ts` / `popularity.ts` — content candidates (cosine ≥ `retrieval.minContentAffinity`, top ~50) and popularity candidates (`priorWeight·seedPrior + behaviorWeight·log1p(Σ positive weights)/max`, top ~15), both excluding terminal-state projects.
 - `lib/recommender/collaborative.ts` — item-item collaborative filtering: current-state collaborative signal, item vectors over users, shrunk cosine neighbours, seed-weighted evidence aggregation, top ~30 collaborative candidates with supporting-seed diagnostics.
+- `lib/recommender/novelty.ts` — transparent novelty (`0.65 × underexposure + 0.35 × adjacency`) with its two components reported separately.
+- `lib/recommender/exploration.ts` — exploration candidate retrieval (fourth source): plausibility anchor, exploration score, preference-dependent candidate limit, per-candidate diagnostics.
+- `lib/recommender/diversify.ts` — MMR diversification over the ranked list (λ from the preference, near-duplicate and per-tag limits, relevance band, relaxation diagnostics); never changes scores.
 - `lib/recommender/candidates.ts` — merge retrieval outputs per project (all sources + raw signals kept) and filter with reasons.
-- `lib/recommender/rank.ts` — `score = clamp01(Σ weight[c]·signal[c])` over the components available for the user (content 0.45 / collaborative 0.25 / popularity 0.10 renormalised → 0.5625 / 0.3125 / 0.125; content + popularity only when there is no behavioural history; popularity boosted for cold start); absent evidence contributes 0 and is reported as `null`; saved projects demoted; ties: popularity prior, then slug.
-- `lib/recommender/explain.ts` — deterministic explanations from real signals (taste / onboarding / session / collaborative naming the user's own seed projects / fit / popularity).
+- `lib/recommender/rank.ts` — `score = clamp01(Σ weight[c]·signal[c])` over the components available for the user; exploration-aware base weights `content 0.45 − 0.15e / collaborative 0.25 − 0.05e / novelty 0.05 + 0.30e / popularity 0.10` renormalised by `resolveRankingWeights` (with every component: e = 0 → 0.529 / 0.294 / 0.059 / 0.118, e = 0.35 → 0.449 / 0.263 / 0.175 / 0.113, e = 1 → 0.316 / 0.211 / 0.368 / 0.105); content + novelty + popularity when there is no behavioural history, novelty + popularity for an empty profile; popularity ×3 for cold start; absent evidence contributes 0 and is reported as `null`; saved projects demoted; ties: popularity prior, then slug.
+- `lib/recommender/explain.ts` — deterministic explanations from real signals (taste / onboarding / session / collaborative naming the user's own seed projects / novelty & exploration wording gated on real underexposure/adjacency / fit / popularity).
 - `lib/recommender/similar.ts` — profile-independent project-to-project similarity for "Similar projects".
-- `lib/recommender/recommend.ts` — the orchestrator: profile → retrieve → merge → filter → signals → rank → top-K → explain (pure pipeline + injectable loaders).
+- `lib/recommender/recommend.ts` — the orchestrator: profile → signals (affinity, popularity, collaborative, novelty) → retrieve (4 sources) → merge → filter → rank → diversify → top-K → explain (pure pipeline + injectable loaders).
 - `lib/recommendations/` — Prisma loaders (catalog with vectors, popularity evidence) and feed / similar / detail-context services.
 - `lib/saved/` — saved-project state, filters and sorting.
 - `lib/sessions/` — server-side session resolution (30-minute inactivity timeout, explicit "start new session").
@@ -134,7 +140,7 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/recommendations?limit=10` | Personalised feed (rank, match score, score breakdown, candidate sources, explanation, project); 409 until onboarding is complete |
+| `GET /api/recommendations?limit=10` | Personalised feed (rank, pre-diversification rank, match score, score breakdown incl. novelty, candidate sources, exploration + diversification diagnostics, explanation, project) plus pipeline stats and context (exploration preference/mode, diversification λ and limits); 409 until onboarding is complete |
 | `POST /api/interactions` | Record `{ projectId, type, dwellMs? }` for the demo user; the server resolves the session and the weight |
 | `GET /api/profile` | Onboarding state, exploration preference, long-term and session profiles, statistics, active session |
 | `PATCH /api/profile` | Update supported settings (`explorationPreference` in [0, 1]) |
@@ -148,12 +154,12 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 - Feature-based user profiles (Phase 2): decayed, weighted aggregation of project features from interactions, explicit onboarding prior (topics, pairwise choices, difficulty/duration), signed normalisation, separate long-term and session profiles.
 - Content-based recommendation (Phase 3): cosine similarity between the effective profile and project feature vectors, content + popularity candidate retrieval, terminal-state filtering, cold-start weighting, transparent weighted ranking with deterministic tie-breaks, deterministic explanations, project-to-project similar projects.
 - Item-item collaborative filtering + hybrid ranking (Phase 4): behavioural item vectors over users, shrunk cosine item similarity, seed-weighted collaborative retrieval with sparse-history confidence, three-source candidate merge, hybrid ranking with renormalised weights and a nullable per-component breakdown, collaborative explanations that name real seed projects.
-- Planned: exploration retrieval + novelty, exploration-adjusted weights, MMR-style diversification, adaptive session blending, Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
+- Exploration, novelty, diversification and cold-start improvements (Phase 5): persisted Familiar ↔ Adventurous preference (slider on `/discover`), transparent novelty (underexposure + adjacency), plausibility-anchored exploration retrieval as a fourth candidate source, exploration-aware ranking weights with a Novelty row in every score breakdown, MMR diversification with pre/final rank diagnostics, novelty/exploration explanations gated on real signals, and a "Most adventurous" sort on `/saved`.
+- Planned: adaptive session blending, Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
 
 ## Current limitations
 
-- Exploration/novelty/diversification, adaptive session ranking, the Insights recommendation inspector and offline evaluation are not yet implemented (Phases 5–8).
-- The exploration preference is stored but does not yet change recommendations (Phase 5).
+- Adaptive session ranking, the Insights recommendation inspector and offline evaluation are not yet implemented (Phases 6–8).
 - Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).
 - Local development only; no deployment configuration.

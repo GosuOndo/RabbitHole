@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RECOMMENDER_CONFIG, STRONG_POSITIVE_INTERACTION_TYPES, interactionWeight } from "@/lib/recommender/config";
+import { resolveRankingWeights } from "@/lib/recommender/rank";
 import { CANDIDATE_SOURCES, SCORE_COMPONENTS } from "@/lib/recommender/types";
 
 describe("RECOMMENDER_CONFIG", () => {
@@ -18,13 +19,16 @@ describe("RECOMMENDER_CONFIG", () => {
     expect(interactionWeight("IMPRESSION")).toBe(0);
   });
 
-  it("has ranking weights for every score component that sum to 1", () => {
+  it("has non-negative base ranking weights that resolve to a sum of 1 for any exploration preference", () => {
     const weights = RECOMMENDER_CONFIG.rankingWeights;
     for (const component of SCORE_COMPONENTS) {
       expect(weights[component]).toBeGreaterThanOrEqual(0);
     }
-    const total = SCORE_COMPONENTS.reduce((sum, component) => sum + weights[component], 0);
-    expect(total).toBeCloseTo(1, 6);
+    for (const e of [0, 0.35, 1]) {
+      const resolved = resolveRankingWeights(["content", "collaborative", "novelty", "popularity"], { explorationPreference: e });
+      const total = Object.values(resolved).reduce((sum, w) => sum + (w ?? 0), 0);
+      expect(total).toBeCloseTo(1, 6);
+    }
   });
 
   it("configures a positive candidate count for every retrieval source", () => {
@@ -33,12 +37,19 @@ describe("RECOMMENDER_CONFIG", () => {
     }
   });
 
-  it("keeps exploration defaults inside the allowed range", () => {
-    const { defaultPreference, minPreference, maxPreference, weightPivot } = RECOMMENDER_CONFIG.exploration;
+  it("keeps exploration defaults inside the allowed range and its retrieval bounds ordered", () => {
+    const { defaultPreference, minPreference, maxPreference, retrieval, weightSlopes } = RECOMMENDER_CONFIG.exploration;
     expect(defaultPreference).toBeGreaterThanOrEqual(minPreference);
     expect(defaultPreference).toBeLessThanOrEqual(maxPreference);
-    expect(weightPivot).toBeGreaterThanOrEqual(minPreference);
-    expect(weightPivot).toBeLessThanOrEqual(maxPreference);
+    expect(retrieval.minCandidates).toBeLessThanOrEqual(retrieval.maxCandidates);
+    expect(retrieval.noveltyWeight + retrieval.plausibilityWeight).toBeCloseTo(1, 6);
+    expect(weightSlopes.novelty).toBeGreaterThan(0);
+    expect(weightSlopes.content).toBeLessThan(0);
+    expect(RECOMMENDER_CONFIG.novelty.underexposureWeight + RECOMMENDER_CONFIG.novelty.adjacencyWeight).toBeCloseTo(1, 6);
+    const { lambdaMin, lambdaMax, lambdaBase, nearDuplicateSimilarity } = RECOMMENDER_CONFIG.diversity;
+    expect(lambdaMin).toBeLessThanOrEqual(lambdaBase);
+    expect(lambdaBase).toBeLessThanOrEqual(lambdaMax);
+    expect(nearDuplicateSimilarity).toBeGreaterThan(0.5);
   });
 
   it("uses a positive half-life and a session timeout of about 30 minutes", () => {

@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { InteractionType } from "@/generated/prisma/enums";
 import { EmptyState } from "@/components/empty-state";
+import { ExplorationSlider } from "@/components/exploration-slider";
 import { RecommendationCard, type RecommendationCardState } from "@/components/recommendation-card";
 import { Button } from "@/components/ui/button";
 import { IMPRESSION_VISIBILITY_THRESHOLD, createImpressionTracker } from "@/lib/client/impressions";
@@ -21,17 +22,27 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 function describeContext(context: RecommendationFeedData["context"]): string {
-  if (context.profileEmpty) return "No taste signal yet — showing what is popular with RabbitHole users.";
+  if (context.profileEmpty) {
+    return context.exploration.mode === "adventurous"
+      ? "No taste signal yet — showing popular and less-explored projects across the catalog."
+      : "No taste signal yet — showing what is popular with RabbitHole users.";
+  }
   const parts: string[] = [];
   if (context.coldStart) parts.push("Still learning your taste, so popular projects weigh a little more until you interact more");
   else parts.push(`Personalised from ${context.weightedInteractionCount} weighted interactions`);
   if (context.includesOnboarding) parts.push("your onboarding answers");
   let text = parts.length === 2 ? `${parts[0]} and ${parts[1]}.` : `${parts[0]}.`;
   if (context.sessionWeight > 0) text += " Includes a touch of what you explored this session.";
+  if (context.exploration.mode === "adventurous") text += " Adventurous mode: more novel and varied picks that stay relevant.";
+  else if (context.exploration.mode === "familiar") text += " Familiar mode: confident matches first.";
   return text;
 }
 
 const defaultStatus = (item: RecommendationView): RecommendationCardState => ({ saved: item.saved, built: false, pending: false, message: null });
+
+const noopSubscribe = () => () => {};
+/** False during server rendering and hydration, true once React is interactive on the client. */
+const useHydrated = () => useSyncExternalStore(noopSubscribe, () => true, () => false);
 
 /**
  * The Discover feed. Server-rendered recommendations come in as props; the
@@ -40,9 +51,16 @@ const defaultStatus = (item: RecommendationView): RecommendationCardState => ({ 
  * /api/recommendations when the list runs low. Keyboard: ← Nope, → next,
  * S save, B build, ? explanation.
  */
-export function RecommendationFeed({ initial }: { initial: RecommendationFeedData }) {
+export function RecommendationFeed({
+  initial,
+  explorationLabels,
+}: {
+  initial: RecommendationFeedData;
+  explorationLabels: { familiarMax: number; adventurousMin: number };
+}) {
   const [items, setItems] = useState<RecommendationView[]>(initial.items);
   const [context, setContext] = useState(initial.context);
+  const [explorationPreference, setExplorationPreference] = useState(initial.context.exploration.preference);
   const [statuses, setStatuses] = useState<Record<string, RecommendationCardState>>(() =>
     Object.fromEntries(initial.items.map((item) => [item.project.id, defaultStatus(item)])),
   );
@@ -51,6 +69,7 @@ export function RecommendationFeed({ initial }: { initial: RecommendationFeedDat
   const [feedMessage, setFeedMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [exhausted, setExhausted] = useState(initial.items.length === 0);
+  const hydrated = useHydrated();
 
   const dismissedRef = useRef(new Set<string>());
   const trackerRef = useRef(createImpressionTracker());
@@ -117,6 +136,28 @@ export function RecommendationFeed({ initial }: { initial: RecommendationFeedDat
       }
     } catch (error) {
       setFeedMessage(error instanceof Error ? error.message : "Could not load more recommendations.");
+    } finally {
+      setLoading(false);
+    }
+  }, [initial.limit]);
+
+  /** Re-requests the feed from scratch (after the exploration preference changed) and replaces the list. */
+  const reloadFeed = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/recommendations?limit=${initial.limit}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`Could not refresh recommendations (${response.status}).`);
+      const feed = (await response.json()) as RecommendationFeedData;
+      const fresh = feed.items.filter((item) => !dismissedRef.current.has(item.project.id));
+      setContext(feed.context);
+      setStatuses((previous) => Object.fromEntries(fresh.map((item) => [item.project.id, previous[item.project.id] ?? defaultStatus(item)])));
+      setItems(fresh);
+      setCurrentIndex(0);
+      setExplanationFor(null);
+      setExhausted(fresh.length === 0);
+      setFeedMessage("Feed refreshed for your discovery mode.");
+    } catch (error) {
+      setFeedMessage(error instanceof Error ? error.message : "Could not refresh recommendations.");
     } finally {
       setLoading(false);
     }
@@ -229,14 +270,24 @@ export function RecommendationFeed({ initial }: { initial: RecommendationFeedDat
   });
 
   return (
-    <div className="flex flex-col gap-4" data-testid="recommendation-feed">
-      <div className="flex flex-col gap-2 rounded-card border border-border bg-surface-raised/50 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-muted" data-testid="feed-context">
-          {describeContext(context)}
-        </p>
-        <p className="shrink-0 font-mono text-[11px] text-subtle" aria-label="Keyboard shortcuts">
-          ← nope · → next · S save · B build · ? why
-        </p>
+    <div className="flex flex-col gap-4" data-testid="recommendation-feed" data-hydrated={hydrated ? "true" : "false"}>
+      <div className="flex flex-col gap-3 rounded-card border border-border bg-surface-raised/50 px-4 py-3 text-sm">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-muted" data-testid="feed-context">
+            {describeContext(context)}
+          </p>
+          <p className="shrink-0 font-mono text-[11px] text-subtle" aria-label="Keyboard shortcuts">
+            ← nope · → next · S save · B build · ? why
+          </p>
+        </div>
+        <ExplorationSlider
+          value={explorationPreference}
+          thresholds={explorationLabels}
+          onCommitted={async (value) => {
+            setExplorationPreference(value);
+            await reloadFeed();
+          }}
+        />
       </div>
 
       <p className="min-h-4 text-sm text-muted" aria-live="polite" data-testid="feed-message">
@@ -270,6 +321,7 @@ export function RecommendationFeed({ initial }: { initial: RecommendationFeedDat
                 state={statuses[item.project.id] ?? defaultStatus(item)}
                 isCurrent={index === currentIndex}
                 explanationOpen={explanationFor === item.project.id}
+                discoveryMode={context.exploration.mode}
                 onNope={() => void nope(item)}
                 onToggleSave={() => void toggleSave(item)}
                 onBuild={() => void build(item)}

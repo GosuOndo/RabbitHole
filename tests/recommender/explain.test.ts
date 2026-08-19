@@ -142,6 +142,74 @@ describe("explainRecommendation", () => {
     });
   });
 
+  describe("novelty / exploration wording", () => {
+    const adventurousWeights = { content: 0.316, collaborative: 0.211, novelty: 0.368, popularity: 0.105 };
+    const familiarWeights = { content: 0.529, collaborative: 0.294, novelty: 0.059, popularity: 0.118 };
+    const highNovelty = { novelty: 0.72, underexposure: 0.8, adjacency: 0.6 };
+
+    it("uses adventurous wording only for a high preference and an exploration-sourced, genuinely novel project", () => {
+      const result = explainRecommendation(
+        baseInput({ contentAffinity: 0.3, sources: ["content", "exploration"], novelty: highNovelty, explorationPreference: 0.9, weights: adventurousWeights }),
+      );
+      expect(result.primary).toBe("novelty");
+      expect(result.text).toMatch(/^You're in a more adventurous discovery mode, so RabbitHole is showing a less familiar project related to (systems|databases)\./);
+      expect(result.factors.find((f) => f.kind === "novelty")!.strength).toBe(0.72);
+    });
+
+    it("explains adjacency or underexposure honestly when the preference is low, and never claims adventurous mode", () => {
+      const result = explainRecommendation(
+        baseInput({ contentAffinity: 0.3, sources: ["content", "exploration"], novelty: highNovelty, explorationPreference: 0.1, weights: adventurousWeights }),
+      );
+      expect(result.text).not.toMatch(/adventurous/);
+      expect(result.text).toMatch(/A bit of a wildcard: this explores an adjacent area while still matching your (systems|databases) interests\./);
+      const underexposed = explainRecommendation(
+        baseInput({ contentAffinity: 0.3, sources: ["content", "exploration"], novelty: { novelty: 0.6, underexposure: 0.9, adjacency: 0.2 }, explorationPreference: 0.1, weights: adventurousWeights }),
+      );
+      expect(underexposed.text).toMatch(/This is less commonly explored, but still overlaps with your interest in (systems|databases)\./);
+    });
+
+    it("stays secondary when content dominates and is omitted when the project was not an exploration pick", () => {
+      const secondary = explainRecommendation(
+        baseInput({ contentAffinity: 0.8, sources: ["content", "exploration"], novelty: highNovelty, explorationPreference: 0.5, weights: familiarWeights }),
+      );
+      expect(secondary.primary).toBe("taste");
+      expect(secondary.text).toMatch(/^Because you like .* projects\. A bit of a wildcard/);
+      const notExploration = explainRecommendation(baseInput({ contentAffinity: 0.8, sources: ["content"], novelty: highNovelty, explorationPreference: 0.5, weights: familiarWeights }));
+      expect(notExploration.text).not.toMatch(/wildcard|less commonly|adventurous/);
+      // The factor is still recorded as data for the inspector.
+      expect(notExploration.factors.some((f) => f.kind === "novelty")).toBe(true);
+    });
+
+    it("never turns negative affinity or mere unpopularity into novelty wording", () => {
+      const disliked = explainRecommendation(
+        baseInput({ project: projectBySlug("habit-tracker-mobile-app"), contentAffinity: -0.6, sources: ["exploration"], novelty: { novelty: 0.9, underexposure: 0.95, adjacency: 0 }, explorationPreference: 1, weights: adventurousWeights }),
+      );
+      expect(disliked.text).not.toMatch(/wildcard|less commonly|adventurous|less familiar/);
+      expect(disliked.factors.some((f) => f.kind === "novelty")).toBe(false);
+      const merelyUnpopular = explainRecommendation(
+        baseInput({ contentAffinity: 0.5, sources: ["content"], novelty: { novelty: 0.4, underexposure: 0.5, adjacency: 0.3 }, explorationPreference: 1, weights: adventurousWeights }),
+      );
+      expect(merelyUnpopular.factors.some((f) => f.kind === "novelty")).toBe(false);
+    });
+
+    it("keeps collaborative wording dependent on real seeds and is deterministic", () => {
+      const withSeeds = baseInput({
+        contentAffinity: 0.2,
+        sources: ["collaborative", "exploration"],
+        novelty: highNovelty,
+        explorationPreference: 0.9,
+        weights: adventurousWeights,
+        collaborativeScore: 0.9,
+        collaborativeSeeds: [{ projectId: "build-your-own-redis", title: "Build your own Redis", state: "saved", contribution: 1 }],
+      });
+      const result = explainRecommendation(withSeeds);
+      expect(result.text).toMatch(/People who liked “Build your own Redis”|adventurous discovery mode/);
+      expect(explainRecommendation(withSeeds)).toEqual(result);
+      const noSeeds = explainRecommendation({ ...withSeeds, collaborativeSeeds: [] });
+      expect(noSeeds.text).not.toMatch(/People who liked/);
+    });
+  });
+
   it("is deterministic and lowercases prose labels sensibly", () => {
     const a = explainRecommendation(baseInput({}));
     const b = explainRecommendation(baseInput({}));
