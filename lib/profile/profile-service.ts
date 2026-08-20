@@ -51,8 +51,10 @@ export interface InterestProfileView {
   norm: number;
   /** Tag features the user leans towards, strongest first. */
   tags: ProfileFeatureView[];
-  /** Tag features with negative signal (dislikes), strongest dislike first. */
+  /** Tag features with negative signal, strongest negative first. */
   dislikedTags: ProfileFeatureView[];
+  /** Language features with negative signal, strongest negative first. */
+  dislikedLanguages: ProfileFeatureView[];
   languages: ProfileFeatureView[];
   difficulty: ProfileFeatureView[];
   duration: ProfileFeatureView[];
@@ -162,6 +164,7 @@ function toProfileView(profile: InterestProfile, labels: LabelMaps): InterestPro
     norm: profile.norm,
     tags: view(rankFeatures(profile, { family: "tag", sign: "positive", limit: PROFILE_FEATURE_LIMIT })),
     dislikedTags: view(rankFeatures(profile, { family: "tag", sign: "negative", limit: PROFILE_FEATURE_LIMIT })),
+    dislikedLanguages: view(rankFeatures(profile, { family: "language", sign: "negative", limit: 6 })),
     languages: view(rankFeatures(profile, { family: "language", sign: "positive", limit: 6 })),
     difficulty: view(rankFeatures(profile, { family: "difficulty", sign: "positive" })),
     duration: view(rankFeatures(profile, { family: "duration", sign: "positive" })),

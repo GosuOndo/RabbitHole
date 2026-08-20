@@ -32,6 +32,31 @@ async function fetchProfile(request: APIRequestContext): Promise<ProfileResponse
   return (await response.json()) as ProfileResponse;
 }
 
+test.describe("insights before any activity", () => {
+  test("shows the live empty profile and a useful no-runs state without recording anything (Phase 7)", async ({ page, request }) => {
+    const insights = await (await request.get("/api/insights")).json();
+    expect(insights.recentRuns).toEqual([]);
+    expect(insights.selectedRun).toBeNull();
+    expect(insights.runs.stored).toBe(0);
+    expect(insights.runs.maxStored).toBeGreaterThan(0);
+    expect(insights.profile.longTermProfile.isEmpty).toBe(true);
+    expect(insights.profile.sessionFocus.available).toBe(false);
+
+    await page.goto("/insights");
+    await expect(page.getByTestId("long-term-profile")).toContainText("No taste signal yet");
+    await expect(page.getByTestId("session-profile")).toBeVisible();
+    await expect(page.getByTestId("session-focus-metrics")).toContainText("No strong session focus yet.");
+    await expect(page.getByTestId("no-runs")).toContainText("No recommendation run recorded yet");
+    await expect(page.getByTestId("pipeline-stats")).toHaveCount(0);
+
+    // Viewing insights is read-only: it never records a run.
+    const after = await (await request.get("/api/insights")).json();
+    expect(after.runs.stored).toBe(0);
+    // An unknown run id is a 404, never someone else's data.
+    expect((await request.get("/api/insights?runId=does-not-exist")).status()).toBe(404);
+  });
+});
+
 test.describe("onboarding", () => {
   test("a fresh demo user is sent to onboarding and can complete every step", async ({ page, request }) => {
     await page.goto("/");

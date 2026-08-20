@@ -4,7 +4,7 @@ Personalized project discovery: RabbitHole recommends interesting software-engin
 
 The recommender is the product. It is a modular pipeline — user profile → candidate retrieval → ranking → session adjustment → diversification → explanation — built from understandable, testable functions with centralized configuration, offline evaluation and baseline comparison.
 
-> **Status:** Phases 1–6 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and a genuine hybrid recommender — content similarity, item-item collaborative filtering, popularity and plausibility-anchored exploration as four separate retrieval sources merged into one candidate pool, exploration- and session-aware hybrid ranking with an honest score breakdown (content · collaborative · session · novelty · popularity), MMR diversification, deterministic explanations, the Familiar ↔ Adventurous discovery slider, adaptive current-session influence with a Start-new-session control, the personalised `/discover` feed, saved projects and similar projects. Insights diagnostics and offline evaluation arrive in the following phases.
+> **Status:** Phases 1–7 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and a genuine hybrid recommender — content similarity, item-item collaborative filtering, popularity and plausibility-anchored exploration as four separate retrieval sources merged into one candidate pool, exploration- and session-aware hybrid ranking with an honest score breakdown (content · collaborative · session · novelty · popularity), MMR diversification, deterministic explanations, the Familiar ↔ Adventurous discovery slider, adaptive current-session influence with a Start-new-session control, the personalised `/discover` feed, saved projects, similar projects, and the `/insights` recommender transparency page with persisted recommendation-run snapshots and a per-result inspector. Offline evaluation arrives in Phase 8.
 
 ## Technology stack
 
@@ -132,7 +132,8 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 - `lib/recommender/explain.ts` — deterministic explanations from real signals (taste / onboarding / session wording gated on confidence, positive session tags and affinity / collaborative naming the user's own seed projects / novelty & exploration wording gated on real underexposure/adjacency / fit / popularity).
 - `lib/recommender/similar.ts` — profile-independent project-to-project similarity for "Similar projects".
 - `lib/recommender/recommend.ts` — the orchestrator: session confidence → effective profile → signals (affinity, session affinity, popularity, collaborative, novelty) → retrieve (4 sources) → merge → filter → rank → diversify → top-K → explain (pure pipeline + injectable loaders); algorithm id `hybrid-session-v1`.
-- `lib/recommendations/` — Prisma loaders (catalog with vectors, popularity evidence) and feed / similar / detail-context services.
+- `lib/recommendations/` — Prisma loaders (catalog with vectors, popularity evidence), feed / similar / detail-context services, plus `run-snapshot.ts` (pure, JSON-safe immutable run/result snapshots + weighted-contribution maths) and `recommendation-run-service.ts` (transactional run recording at the feed boundary only, retention pruning, owner-scoped run reads).
+- `lib/insights/` — the Insights view model: live profile snapshot + recent runs + one selected run, consumed by `/insights` and `GET /api/insights`.
 - `lib/saved/` — saved-project state, filters and sorting.
 - `lib/sessions/` — server-side session resolution (30-minute inactivity timeout, explicit "start new session").
 - `lib/interactions/` — interaction recording with server-owned weights, zod schemas, per-project state derivation.
@@ -150,6 +151,7 @@ Layering: React/UI → API routes → services (`lib/sessions`, `lib/interaction
 | `GET /api/profile` | Onboarding state, exploration preference, long-term and current-session profiles, session focus (evidence / coherence / confidence / blend weight / top features), statistics, active session |
 | `PATCH /api/profile` | Update supported settings (`explorationPreference` in [0, 1]) |
 | `GET /api/sessions` / `POST /api/sessions` | Current session / start a new session (ends the current one, keeps all history; the server identifies the demo user) |
+| `GET /api/insights[?runId=]` | Recommender transparency: live profile + session focus, the 10 most recent recommendation runs, and one selected run's immutable snapshot (pipeline counts, context, per-result breakdowns/weights/contributions/raw signals/explanations); unknown or foreign runId → 404 |
 | `GET /api/onboarding` / `POST /api/onboarding` | Questionnaire definition + state / complete onboarding |
 
 Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 status codes.
@@ -161,11 +163,12 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 - Item-item collaborative filtering + hybrid ranking (Phase 4): behavioural item vectors over users, shrunk cosine item similarity, seed-weighted collaborative retrieval with sparse-history confidence, three-source candidate merge, hybrid ranking with renormalised weights and a nullable per-component breakdown, collaborative explanations that name real seed projects.
 - Exploration, novelty, diversification and cold-start improvements (Phase 5): persisted Familiar ↔ Adventurous preference (slider on `/discover`), transparent novelty (underexposure + adjacency), plausibility-anchored exploration retrieval as a fourth candidate source, exploration-aware ranking weights with a Novelty row in every score breakdown, MMR diversification with pre/final rank diagnostics, novelty/exploration explanations gated on real signals, and a "Most adventurous" sort on `/saved`.
 - Session-aware recommendation (Phase 6): long-term vs current-session profiles without double counting, session evidence/coherence/confidence, adaptive blend replacing the fixed 0.25, explicit session-affinity ranking component, honest session explanations, current-session indicator and Start-new-session control on `/discover`, typed session diagnostics.
-- Planned: Insights pipeline diagnostics, held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
+- Insights & recommendation diagnostics (Phase 7): every user-facing feed generation is persisted as an immutable `RecommendationRun` + final `RecommendationResult`s (algorithm id, session, all ten pipeline stage counts, full session/exploration/diversification/collaborative context, per-result component scores with null-preserving semantics, effective weights, raw retrieval signals, and the exact generated explanation). `/insights` visualises the live long-term vs current-session profiles (positive *and* negative signals), the adaptive session focus (evidence/coherence/confidence/blend), the recorded pipeline, recent runs (retention: newest 25 kept, 10 listed) and a per-result inspector showing score × weight = contribution, retrieval signals, sources and pre- vs post-diversification ranks. Snapshots are historical — inspecting an old run never recomputes it against today's profile — and viewing Insights never records a run.
+- Planned: held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
 
 ## Current limitations
 
-- The Insights recommendation inspector and offline evaluation are not yet implemented (Phases 7–8).
+- Offline evaluation (`npm run evaluate`) is not yet implemented (Phase 8).
 - A session's influence is capped while it is active, but once it ends its interactions count as ordinary history at full (decayed) weight — for users with very little history a single intense session can therefore move long-term taste noticeably.
 - Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).

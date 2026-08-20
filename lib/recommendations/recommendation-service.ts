@@ -36,6 +36,7 @@ import {
   loadRecommendationProfile,
   type CatalogItem,
 } from "./loaders";
+import { recordRecommendationRun } from "./recommendation-run-service";
 
 export interface RecommendationView {
   /** Final position after diversification. */
@@ -68,6 +69,8 @@ export interface RecommendationFeed {
   items: RecommendationView[];
   pipeline: PipelineStats;
   context: RecommendationContext;
+  /** Id of the persisted diagnostic run for this generation (null when recording is disabled or failed). */
+  runId: string | null;
 }
 
 export function toProjectSummary(item: CatalogItem): ProjectSummary {
@@ -84,7 +87,12 @@ export function toProjectSummary(item: CatalogItem): ProjectSummary {
   };
 }
 
-/** Personalised feed for a user (content + collaborative + popularity). */
+/**
+ * Personalised feed for a user — the one user-facing generation boundary. Each
+ * call records an immutable RecommendationRun diagnostic snapshot (Insights);
+ * if recording fails the feed is still returned (recommendation availability
+ * over diagnostics) with `runId: null` and the failure logged.
+ */
 export async function getRecommendationFeed(userId: string, options: { limit?: number; now?: Date } = {}): Promise<RecommendationFeed> {
   const catalog = await loadCatalogItems();
   const deps: RecommenderDeps = {
@@ -95,6 +103,12 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
     loadLabelResolver,
   };
   const result = await recommendForUser(deps, { userId, limit: options.limit, now: options.now });
+  let runId: string | null = null;
+  try {
+    runId = (await recordRecommendationRun(userId, result))?.id ?? null;
+  } catch (error) {
+    console.error("[recommendations] failed to record the recommendation run", error);
+  }
   const byId = new Map(catalog.map((item) => [item.id, item]));
   return {
     algorithm: result.algorithm,
@@ -102,6 +116,7 @@ export async function getRecommendationFeed(userId: string, options: { limit?: n
     limit: result.limit,
     pipeline: result.pipeline,
     context: result.context,
+    runId,
     items: result.items.flatMap((item) => {
       const project = byId.get(item.projectId);
       if (!project) return [];

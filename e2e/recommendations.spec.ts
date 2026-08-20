@@ -36,6 +36,7 @@ type FeedResponse = {
     diversifiedCandidates: number;
     final: number;
   };
+  runId: string | null;
   context: {
     coldStart: boolean;
     profileEmpty: boolean;
@@ -59,6 +60,55 @@ type FeedResponse = {
 
 const GRAPHICS_TAGS = ["graphics", "webgl", "creative-coding", "simulation", "procedural-generation"];
 const countTagged = (items: FeedResponse["items"], tags: string[]) => items.filter((i) => i.project.tags.some((t) => tags.includes(t.slug))).length;
+
+type InsightsResponse = {
+  profile: {
+    longTermProfile: { isEmpty: boolean };
+    sessionFocus: { available: boolean; confidence: number; blendWeight: number; topFeatures: { key: string }[] };
+    user: { explorationPreference: number };
+  };
+  recentRuns: {
+    id: string;
+    createdAt: string;
+    algorithm: string;
+    sessionId: string | null;
+    resultCount: number;
+    explorationMode: string | null;
+    sessionConfidence: number | null;
+  }[];
+  selectedRun: {
+    id: string;
+    createdAt: string;
+    algorithm: string;
+    sessionId: string | null;
+    requestedLimit: number;
+    explorationPreference: number;
+    weights: FeedResponse["items"][number]["weights"];
+    pipeline: FeedResponse["pipeline"];
+    context: FeedResponse["context"] | null;
+    results: {
+      rank: number;
+      preDiversificationRank: number | null;
+      projectId: string;
+      project: { id: string; slug: string; title: string };
+      score: number;
+      breakdown: FeedResponse["items"][number]["breakdown"];
+      contributions: Record<string, number | null>;
+      sources: string[];
+      rawSignals: Record<string, number>;
+      explanation: { text: string; primary: string | null };
+      session: { raw: number; score: number } | null;
+      saved: boolean | null;
+    }[];
+  } | null;
+  runs: { stored: number; maxStored: number; recentShown: number };
+};
+
+async function fetchInsights(request: APIRequestContext, runId?: string): Promise<InsightsResponse> {
+  const response = await request.get(runId ? `/api/insights?runId=${runId}` : "/api/insights");
+  expect(response.ok()).toBe(true);
+  return (await response.json()) as InsightsResponse;
+}
 
 async function setExplorationPreference(request: APIRequestContext, value: number): Promise<void> {
   const response = await request.patch("/api/profile", { data: { explorationPreference: value } });
@@ -236,6 +286,186 @@ test.describe("recommendation API", () => {
     } finally {
       await setExplorationPreference(request, original);
     }
+  });
+});
+
+test.describe("insights & recommendation runs (Phase 7)", () => {
+  test("records each feed generation as an immutable run and serves it read-only through /api/insights", async ({ request }) => {
+    const feed = await fetchFeed(request, 7);
+    expect(feed.runId).toBeTruthy();
+    const insights = await fetchInsights(request);
+    const run = insights.selectedRun!;
+    expect(run).not.toBeNull();
+    expect(run.id).toBe(feed.runId);
+    expect(run.algorithm).toBe("hybrid-session-v1");
+    expect(run.requestedLimit).toBe(7);
+    expect(run.sessionId).toBe(feed.context.session.sessionId);
+
+    // Pipeline counts are the real recorded values — all ten stages, verbatim.
+    for (const key of Object.keys(feed.pipeline) as (keyof FeedResponse["pipeline"])[]) {
+      expect(run.pipeline[key]).toBe(feed.pipeline[key]);
+    }
+    expect(run.context).not.toBeNull();
+    expect(run.context!.session).toEqual(feed.context.session);
+    expect(run.context!.exploration).toEqual(feed.context.exploration);
+    expect(run.context!.diversification).toEqual(feed.context.diversification);
+    expect(run.context!.components).toEqual(feed.context.components);
+
+    // Every returned recommendation is stored exactly as delivered.
+    expect(run.results).toHaveLength(feed.items.length);
+    for (const [index, item] of feed.items.entries()) {
+      const stored = run.results[index]!;
+      expect(stored.projectId).toBe(item.project.id);
+      expect(stored.project.slug).toBe(item.project.slug);
+      expect(stored.rank).toBe(item.rank);
+      expect(stored.preDiversificationRank).toBe(item.preDiversificationRank);
+      expect(stored.score).toBeCloseTo(item.score, 10);
+      expect(stored.sources).toEqual(item.sources);
+      expect(stored.explanation.text).toBe(item.explanation.text);
+      // Null semantics survive storage: unavailable components stay null, never 0.
+      for (const key of ["content", "collaborative", "session", "novelty", "popularity"] as const) {
+        const original = item.breakdown[key];
+        if (original === null) expect(stored.breakdown[key]).toBeNull();
+        else expect(stored.breakdown[key]).toBeCloseTo(original!, 10);
+        // contribution = score x effective weight (or null when the component did not participate).
+        const weight = run.weights[key];
+        if (original === null || weight === undefined) expect(stored.contributions[key]).toBeNull();
+        else expect(stored.contributions[key]).toBeCloseTo(original! * weight, 10);
+      }
+      expect(stored.session === null).toBe(item.session === null);
+    }
+    // Weights stored once per run match the feed's effective weights.
+    expect(run.weights).toEqual(feed.items[0]!.weights);
+
+    // Recent runs are newest-first and include this run at the top.
+    expect(insights.recentRuns.length).toBeGreaterThan(0);
+    expect(insights.recentRuns[0]!.id).toBe(feed.runId);
+    expect(insights.recentRuns[0]!.resultCount).toBe(feed.items.length);
+    const times = insights.recentRuns.map((r) => new Date(r.createdAt).getTime());
+    for (let i = 1; i < times.length; i++) expect(times[i - 1]!).toBeGreaterThanOrEqual(times[i]!);
+
+    // Reading insights is read-only: no new run appears, the latest stays the latest.
+    const again = await fetchInsights(request);
+    expect(again.selectedRun!.id).toBe(feed.runId);
+    expect(again.runs.stored).toBe(insights.runs.stored);
+
+    // Validation: malformed and unknown run ids are safe.
+    expect((await request.get(`/api/insights?runId=${"x".repeat(200)}`)).status()).toBe(400);
+    const missing = await request.get("/api/insights?runId=cmznotarealrunid0000000000");
+    expect(missing.status()).toBe(404);
+    expect((await missing.json()).error.code).toBe("run_not_found");
+  });
+
+  test("retention keeps at most the configured number of stored runs (newest kept)", async ({ request }) => {
+    let lastRunId: string | null = null;
+    for (let i = 0; i < 30; i++) {
+      const feed = await fetchFeed(request, 5);
+      lastRunId = feed.runId;
+    }
+    const insights = await fetchInsights(request);
+    expect(insights.runs.maxStored).toBe(25);
+    expect(insights.runs.stored).toBeLessThanOrEqual(25);
+    expect(insights.runs.stored).toBeGreaterThanOrEqual(20);
+    expect(insights.recentRuns).toHaveLength(insights.runs.recentShown);
+    expect(insights.recentRuns[0]!.id).toBe(lastRunId);
+    expect(insights.selectedRun!.id).toBe(lastRunId);
+  });
+
+  test("exploration transparency: run snapshots keep their historical preference and results", async ({ request }) => {
+    const original = (await (await request.get("/api/profile")).json()).user.explorationPreference as number;
+    try {
+      await setExplorationPreference(request, 0);
+      const familiarFeed = await fetchFeed(request, 10);
+      await setExplorationPreference(request, 1);
+      const adventurousFeed = await fetchFeed(request, 10);
+      expect(familiarFeed.runId).toBeTruthy();
+      expect(adventurousFeed.runId).toBeTruthy();
+
+      // Latest run reflects the adventurous generation.
+      const latest = await fetchInsights(request);
+      expect(latest.selectedRun!.id).toBe(adventurousFeed.runId);
+      expect(latest.selectedRun!.explorationPreference).toBe(1);
+      expect(latest.selectedRun!.context!.exploration.mode).toBe("adventurous");
+      expect(latest.recentRuns.find((r) => r.id === familiarFeed.runId)!.explorationMode).toBe("familiar");
+
+      // Selecting the older run returns its historical snapshot — settings, results and explanations
+      // from generation time, even though the live preference is now 1.
+      const historical = await fetchInsights(request, familiarFeed.runId!);
+      const run = historical.selectedRun!;
+      expect(run.id).toBe(familiarFeed.runId);
+      expect(run.explorationPreference).toBe(0);
+      expect(run.context!.exploration.mode).toBe("familiar");
+      expect(run.results.map((r) => r.project.slug)).toEqual(familiarFeed.items.map((i) => i.project.slug));
+      expect(run.results.map((r) => r.explanation.text)).toEqual(familiarFeed.items.map((i) => i.explanation.text));
+      expect(run.weights.novelty!).toBeCloseTo(familiarFeed.items[0]!.weights.novelty!, 10);
+      expect(run.weights.novelty!).toBeLessThan(latest.selectedRun!.weights.novelty!);
+      expect(historical.profile.user.explorationPreference).toBeCloseTo(1, 6); // live profile vs historical snapshot
+    } finally {
+      await setExplorationPreference(request, original);
+    }
+  });
+
+  test("the Insights page shows the recorded run with real counts and a keyboard-usable inspector", async ({ page, request }) => {
+    await page.goto("/discover");
+    await expect(page.getByTestId("recommendation-card").first()).toBeVisible();
+    const insights = await fetchInsights(request);
+    const run = insights.selectedRun!;
+
+    await page.goto("/insights");
+    // Pipeline panel shows the stored run's real counts, labelled as a snapshot.
+    await expect(page.getByTestId("pipeline-panel")).toContainText("snapshot generated");
+    for (const [stage, value] of [
+      ["content", run.pipeline.contentCandidates],
+      ["collaborative", run.pipeline.collaborativeCandidates],
+      ["popular", run.pipeline.popularCandidates],
+      ["exploration", run.pipeline.explorationCandidates],
+      ["unique", run.pipeline.uniqueCandidates],
+      ["filtered", run.pipeline.afterFiltering],
+      ["ranked", run.pipeline.preDiversificationCandidates],
+      ["final", run.pipeline.diversifiedCandidates],
+    ] as const) {
+      await expect(page.locator(`[data-stage-value="${stage}"]`)).toHaveText(String(value));
+    }
+    await expect(page.getByTestId("selected-run-id")).toHaveText(run.id);
+    await expect(page.getByTestId("recent-runs")).toBeVisible();
+
+    // Inspector: open the first result with the keyboard and verify its stored diagnostics.
+    const first = run.results[0]!;
+    const firstDetails = page.getByTestId("run-result").first();
+    await firstDetails.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await expect(firstDetails).toHaveAttribute("open", "");
+    await expect(firstDetails.locator("summary")).toContainText(first.project.title);
+    await expect(firstDetails.locator("summary")).toContainText(first.score.toFixed(2));
+    await expect(firstDetails.getByTestId("result-explanation")).toHaveText(first.explanation.text);
+    await expect(firstDetails.getByTestId("result-ranks")).toContainText(`pre-diversification #${first.preDiversificationRank}`);
+    await expect(firstDetails.getByTestId("result-ranks")).toContainText(`final #${first.rank}`);
+    const componentsTable = firstDetails.getByTestId("result-components");
+    for (const label of ["Component", "Score", "Weight", "Contribution", "Content", "Collaborative", "Session", "Novelty", "Popularity", "Recommendation score"]) {
+      await expect(componentsTable).toContainText(label);
+    }
+    if (first.breakdown.content !== null && run.weights.content !== undefined) {
+      await expect(componentsTable).toContainText((first.breakdown.content * run.weights.content).toFixed(3));
+    }
+    await expect(firstDetails.getByTestId("result-retrieval")).toContainText("Content source");
+    for (const source of first.sources) {
+      const label = source === "popular" ? "Popular" : source.charAt(0).toUpperCase() + source.slice(1);
+      await expect(firstDetails.getByRole("list", { name: "Candidate sources" })).toContainText(label);
+    }
+
+    // Recent-run links are real keyboard-reachable links that select a historical run.
+    const links = page.getByTestId("recent-run-link");
+    expect(await links.count()).toBeGreaterThanOrEqual(2);
+    const secondRunId = (await links.nth(1).getAttribute("data-run-id"))!;
+    await links.nth(1).focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/insights\\?run=${secondRunId}`));
+    await expect(page.getByTestId("selected-run-id")).toHaveText(secondRunId);
+    await expect(page.getByTestId("recent-run-link").nth(1)).toHaveAttribute("aria-current", "true");
+
+    // An unknown run in the page URL is a 404, not someone else's data.
+    const response = await page.goto("/insights?run=cmznotarealrunid0000000000");
+    expect(response!.status()).toBe(404);
   });
 });
 
@@ -486,6 +716,14 @@ test.describe("discover feed", () => {
     expect(focusedProfile.sessionFocus.available).toBe(true);
     expect(focusedProfile.sessionFocus.topFeatures.map((f: { key: string }) => f.key)).toContain("graphics");
     const focused = await fetchFeed(request, 30);
+    // Insights records this focused generation with its full session diagnostics (Phase 7).
+    expect(focused.runId).toBeTruthy();
+    const focusedInsights = await fetchInsights(request);
+    expect(focusedInsights.selectedRun!.id).toBe(focused.runId);
+    expect(focusedInsights.selectedRun!.context!.session.confidence).toBeGreaterThan(0.4);
+    expect(focusedInsights.selectedRun!.context!.session.topFeatures.map((f) => f.key)).toContain("graphics");
+    expect(focusedInsights.profile.sessionFocus.available).toBe(true);
+    expect(focusedInsights.profile.sessionFocus.topFeatures.map((f) => f.key)).toContain("graphics");
     const s = focused.context.session;
     expect(s.available).toBe(true);
     expect(s.sessionId).toBe(focusedProfile.session.id);
@@ -544,6 +782,16 @@ test.describe("discover feed", () => {
     // The session-specific influence is gone: no session component, weight or wording, and the ranking changes again.
     // (The ended session's behaviour now counts as ordinary history, so long-term taste itself may have moved — see README.)
     const reset = await fetchFeed(request, 30);
+    // Insights: the live session focus is cleared, the new run records no session influence,
+    // and the focused run remains inspectable with its historical (unchanged) session snapshot.
+    const resetInsights = await fetchInsights(request);
+    expect(resetInsights.profile.sessionFocus.available).toBe(false);
+    expect(resetInsights.selectedRun!.id).toBe(reset.runId);
+    expect(resetInsights.selectedRun!.context!.session.available).toBe(false);
+    expect(resetInsights.selectedRun!.context!.session.blendWeight).toBe(0);
+    const historicalFocused = await fetchInsights(request, focused.runId!);
+    expect(historicalFocused.selectedRun!.context!.session.confidence).toBeGreaterThan(0.4);
+    expect(historicalFocused.selectedRun!.context!.session.topFeatures.map((f) => f.key)).toContain("graphics");
     expect(reset.context.session.available).toBe(false);
     expect(reset.context.session.blendWeight).toBe(0);
     expect(reset.context.session.topFeatures).toEqual([]);

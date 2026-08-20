@@ -245,8 +245,12 @@ model RecommendationRun {
   rankedCandidateCount        Int
   finalCount                  Int
 
-  /// Exploration-adjusted ranking weights used for this run.
+  /// Exploration- and session-adjusted effective ranking weights used for this run.
   rankingWeights Json
+  /// Immutable run snapshot: full pipeline stats plus the recommender context
+  /// (session confidence/blend, exploration, diversification, collaborative,
+  /// components, cold-start state). Written once at generation time (Phase 7).
+  diagnostics    Json?
   createdAt      DateTime @default(now())
 
   user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -265,9 +269,10 @@ model RecommendationResult {
   /// Rank before the diversification pass (null if diversification was skipped).
   preDiversificationRank Int?
   finalScore             Float
-  contentScore           Float
-  collaborativeScore     Float
-  sessionScore           Float
+  /// Component scores; null preserves "signal unavailable" (distinct from a real 0).
+  contentScore           Float?
+  collaborativeScore     Float?
+  sessionScore           Float?
   noveltyScore           Float
   popularityScore        Float
   /// Retrieval strategies that surfaced this candidate, e.g. ["content", "collaborative"].
@@ -275,6 +280,9 @@ model RecommendationResult {
   /// Un-normalised retrieval signals kept for the recommendation inspector.
   rawSignals             Json?
   explanation            String
+  /// Immutable per-result snapshot: explanation object plus collaborative /
+  /// session / novelty / exploration / diversification detail (Phase 7).
+  diagnostics            Json?
 
   run     RecommendationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   project Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)

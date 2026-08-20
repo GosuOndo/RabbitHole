@@ -305,9 +305,12 @@ export const RECOMMENDER_CONFIG = {
 
   /** Recommendation run diagnostics (Insights page). */
   diagnostics: {
+    /** Record a RecommendationRun (+ its final results) for every user-facing feed generation. */
     persistRuns: true,
     /** Older runs beyond this count are pruned per user to avoid data explosion. */
     maxRunsPerUser: 25,
+    /** Recent runs listed on /insights and in GET /api/insights. */
+    recentRuns: 10,
   },
 
   /** Offline evaluation settings (`npm run evaluate`). */

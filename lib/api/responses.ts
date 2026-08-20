@@ -6,6 +6,7 @@
 
 import { ZodError } from "zod";
 import { DatabaseConfigurationError } from "@/lib/db";
+import { RunNotFoundError } from "@/lib/insights/insights-service";
 import { ProjectNotFoundError } from "@/lib/interactions/interaction-service";
 import { OnboardingConfigurationError } from "@/lib/onboarding/onboarding-service";
 
@@ -53,6 +54,7 @@ export function handleRouteError(error: unknown): Response {
   }
   if (error instanceof ApiError) return jsonError(error.status, error.code, error.message);
   if (error instanceof ProjectNotFoundError) return jsonError(404, "project_not_found", error.message);
+  if (error instanceof RunNotFoundError) return jsonError(404, "run_not_found", error.message);
   if (error instanceof DatabaseConfigurationError) return jsonError(503, "database_not_configured", error.message);
   if (error instanceof OnboardingConfigurationError) return jsonError(503, "onboarding_unavailable", error.message);
   console.error("[api] unhandled error", error);
