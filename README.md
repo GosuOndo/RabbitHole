@@ -4,7 +4,7 @@ Personalized project discovery: RabbitHole recommends interesting software-engin
 
 The recommender is the product. It is a modular pipeline — user profile → candidate retrieval → ranking → session adjustment → diversification → explanation — built from understandable, testable functions with centralized configuration, offline evaluation and baseline comparison.
 
-> **Status:** Phases 1–7 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and a genuine hybrid recommender — content similarity, item-item collaborative filtering, popularity and plausibility-anchored exploration as four separate retrieval sources merged into one candidate pool, exploration- and session-aware hybrid ranking with an honest score breakdown (content · collaborative · session · novelty · popularity), MMR diversification, deterministic explanations, the Familiar ↔ Adventurous discovery slider, adaptive current-session influence with a Start-new-session control, the personalised `/discover` feed, saved projects, similar projects, and the `/insights` recommender transparency page with persisted recommendation-run snapshots and a per-result inspector. Offline evaluation arrives in Phase 8.
+> **Status:** Phases 1–8 are implemented: schema, deterministic seed catalog, central recommender configuration, app shell, server-side sessions, interaction recording, onboarding, feature-based long-term/session profiles, and a genuine hybrid recommender — content similarity, item-item collaborative filtering, popularity and plausibility-anchored exploration as four separate retrieval sources merged into one candidate pool, exploration- and session-aware hybrid ranking with an honest score breakdown (content · collaborative · session · novelty · popularity), MMR diversification, deterministic explanations, the Familiar ↔ Adventurous discovery slider, adaptive current-session influence with a Start-new-session control, the personalised `/discover` feed, saved projects, similar projects, the `/insights` recommender transparency page with persisted recommendation-run snapshots and a per-result inspector, and a deterministic offline evaluation CLI (`npm run evaluate`) comparing seven algorithms on a leakage-safe chronological holdout.
 
 ## Technology stack
 
@@ -74,8 +74,28 @@ npm run test:e2e  # Playwright (needs a migrated database; run `npx playwright i
 ## Evaluation
 
 ```bash
-npm run evaluate   # (Phase 8) offline metrics and baseline comparison
+npm run evaluate              # offline metrics + baseline comparison (read-only)
+npm run evaluate -- --verbose # adds per-user cutoffs, held-out projects, lists and hits
 ```
+
+Offline evaluation of the recommender against the local seeded database, using a
+**chronological unseen-item holdout**: for every seeded synthetic user with at
+least 5 unique strong-positive projects (SAVE / BUILD / COMPLETE / SHARE — never
+IMPRESSION or DISLIKE, OPEN is context only), the latest-discovered positives
+(clamp(round(20%), 1, 3)) are held out and the cutoff is the user's first-ever
+interaction with the earliest held-out project — so held-out projects are
+completely unseen in training and **nothing after the cutoff (the target user's
+or anyone else's) reaches profiles, sessions, CF or popularity**. All seven
+algorithms — Random (seeded hash), Popularity (training-only evidence), Content
+Only, Collaborative Only, Hybrid (Phase 5 view: session off, MMR off), Hybrid +
+Session, and Hybrid + Session + Diversification (the full production pipeline)
+— compete over the same splits and candidate universes (training-consumed
+positives and terminal states excluded, held-out targets kept eligible), and are
+compared on macro-averaged Precision@5/10, Recall@5/10, NDCG@10, HitRate@10 plus
+catalogue coverage, intra-list diversity and training-popularity novelty. The
+run is deterministic (a split fingerprint is printed), read-only (interaction /
+session / recommendation-run counts are verified unchanged), and the numbers
+depend on the seeded interaction dataset — they change if the data changes.
 
 ## Production build
 
@@ -164,11 +184,12 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 - Exploration, novelty, diversification and cold-start improvements (Phase 5): persisted Familiar ↔ Adventurous preference (slider on `/discover`), transparent novelty (underexposure + adjacency), plausibility-anchored exploration retrieval as a fourth candidate source, exploration-aware ranking weights with a Novelty row in every score breakdown, MMR diversification with pre/final rank diagnostics, novelty/exploration explanations gated on real signals, and a "Most adventurous" sort on `/saved`.
 - Session-aware recommendation (Phase 6): long-term vs current-session profiles without double counting, session evidence/coherence/confidence, adaptive blend replacing the fixed 0.25, explicit session-affinity ranking component, honest session explanations, current-session indicator and Start-new-session control on `/discover`, typed session diagnostics.
 - Insights & recommendation diagnostics (Phase 7): every user-facing feed generation is persisted as an immutable `RecommendationRun` + final `RecommendationResult`s (algorithm id, session, all ten pipeline stage counts, full session/exploration/diversification/collaborative context, per-result component scores with null-preserving semantics, effective weights, raw retrieval signals, and the exact generated explanation). `/insights` visualises the live long-term vs current-session profiles (positive *and* negative signals), the adaptive session focus (evidence/coherence/confidence/blend), the recorded pipeline, recent runs (retention: newest 25 kept, 10 listed) and a per-result inspector showing score × weight = contribution, retrieval signals, sources and pre- vs post-diversification ranks. Snapshots are historical — inspecting an old run never recomputes it against today's profile — and viewing Insights never records a run.
-- Planned: held-out offline evaluation (Precision/Recall@K, NDCG, HitRate, coverage, diversity, novelty) with baselines, and a BPR experiment.
+- Offline evaluation (Phase 8): `lib/recommender/evaluation/` — deterministic chronological unseen-item splits with strict temporal leakage prevention, a shared candidate universe, seven genuinely distinct algorithm adapters reusing the production helpers (never copied formulas), hand-verified metric implementations, and the `npm run evaluate` comparison table with a stable split fingerprint.
+- Planned: a BPR / learned-ranking experiment (later phase).
 
 ## Current limitations
 
-- Offline evaluation (`npm run evaluate`) is not yet implemented (Phase 8).
+- Offline evaluation reports point estimates only (no significance testing) over the ~30-user seeded population; results are indicative, not benchmarks.
 - A session's influence is capped while it is active, but once it ends its interactions count as ordinary history at full (decayed) weight — for users with very little history a single intense session can therefore move long-term taste noticeably.
 - Dwell time is accepted by the API but the UI does not measure it yet.
 - No authentication: everything acts as one persistent demo user (by design for V1).

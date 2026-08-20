@@ -313,13 +313,34 @@ export const RECOMMENDER_CONFIG = {
     recentRuns: 10,
   },
 
-  /** Offline evaluation settings (`npm run evaluate`). */
+  /**
+   * Offline evaluation (`npm run evaluate`) — chronological unseen-item holdout.
+   *
+   * Ground truth = unique projects with a strong-positive event (SAVE / BUILD /
+   * COMPLETE / SHARE; never IMPRESSION or DISLIKE, and OPEN is context only).
+   * Per user the latest-discovered positives are held out (cutoff = the user's
+   * first interaction of any kind with the earliest held-out project, so no
+   * held-out project has any pre-cutoff interaction); everything at/after the
+   * cutoff — the target user's and every other user's — is invisible to training.
+   */
   evaluation: {
+    /** Ranking metric cutoffs (Precision/Recall at each K). */
     ks: [5, 10],
-    /** Users need at least this many positive interactions to be evaluated. */
-    minPositiveInteractions: 3,
-    /** Number of most-recent positive interactions held out per user. */
-    holdoutPositives: 1,
+    /** K for NDCG / HitRate / coverage / diversity / novelty and the recommendation lists. */
+    primaryK: 10,
+    /** Interaction types that define held-out relevance (strong positives only). */
+    positiveTypes: ["SAVE", "BUILD", "COMPLETE", "SHARE"] satisfies InteractionType[],
+    /** Users need at least this many unique strong-positive projects to be evaluated. */
+    minPositiveProjects: 5,
+    /** Held-out unique projects per user: clamp(round(fraction × positives), min, max). */
+    holdoutFraction: 0.2,
+    minHoldout: 1,
+    maxHoldout: 3,
+    /** After the split, training must still contain this many unique positive projects. */
+    minTrainingPositives: 2,
+    /** Held-out projects must be completely unseen (no target-user interaction) before the cutoff. */
+    unseenTargetsOnly: true,
+    /** Seed for the deterministic random baseline and the split fingerprint hash. */
     seed: 20260818,
   },
 
