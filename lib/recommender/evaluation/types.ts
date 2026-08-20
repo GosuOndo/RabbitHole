@@ -84,6 +84,8 @@ export const EVALUATION_ALGORITHMS = [
   "hybrid",
   "hybrid-session",
   "hybrid-session-diversified",
+  "bpr",
+  "hybrid-bpr",
 ] as const;
 export type EvaluationAlgorithmId = (typeof EVALUATION_ALGORITHMS)[number];
 
@@ -95,6 +97,8 @@ export const ALGORITHM_LABELS: Record<EvaluationAlgorithmId, string> = {
   hybrid: "Hybrid",
   "hybrid-session": "Hybrid + Session",
   "hybrid-session-diversified": "Hybrid + Session + Diversification",
+  bpr: "BPR",
+  "hybrid-bpr": "Hybrid + BPR",
 };
 
 /** Macro-averaged ranking metrics plus list-quality metrics for one algorithm. */

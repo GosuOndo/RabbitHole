@@ -1,5 +1,6 @@
 import type { InteractionType } from "@/generated/prisma/enums";
 import { RECOMMENDER_CONFIG } from "@/lib/recommender/config";
+import { buildCaseBprModel } from "@/lib/recommender/evaluation/baselines";
 import { evaluationExclusions } from "@/lib/recommender/evaluation/split";
 import type { EvaluationCase, EvaluationDataset, EvaluationInteraction, EvaluationUser } from "@/lib/recommender/evaluation/types";
 import { catalogFixture } from "./catalog-fixture";
@@ -78,6 +79,7 @@ export function algorithmInputFor(evaluationCase: EvaluationCase) {
     evaluationCase,
     catalog: EVAL_CATALOG,
     catalogById: new Map(EVAL_CATALOG.map((project) => [project.id, project])),
+    bprModel: buildCaseBprModel(evaluationCase, EVAL_CATALOG),
     k: RECOMMENDER_CONFIG.evaluation.primaryK,
     config: RECOMMENDER_CONFIG.evaluation,
   };

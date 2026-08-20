@@ -97,6 +97,34 @@ run is deterministic (a split fingerprint is printed), read-only (interaction /
 session / recommendation-run counts are verified unchanged), and the numbers
 depend on the seeded interaction dataset — they change if the data changes.
 
+## BPR experiment (optional, offline only)
+
+```bash
+npm run train:bpr   # trains the full-data BPR model → data/generated/bpr-model.json (gitignored)
+npm run evaluate    # includes the BPR and Hybrid + BPR rows in the comparison table
+```
+
+Phase 10 adds **Bayesian Personalized Ranking** as a reproducible latent-factor
+experiment: `score(u, i) = p_u · q_i` (16 factors), trained with pairwise SGD to
+maximise `log σ(score(u,i) − score(u,j))` with L2 regularisation over seeded
+deterministic `(user, positive, negative)` triples. Positives are unique
+projects whose current state is saved/built/completed/shared; explicit DISLIKEs
+are preferred negatives (50% of draws when present); the remaining negatives
+are sampled from projects the user has **never touched** (impressions/opens
+mark a project "known but uncertain" and are neither positives nor negatives).
+Training is exactly reproducible (seeded PRNG, deterministic index mappings, a
+data fingerprint and a model checksum). The offline evaluation trains a fresh
+**leakage-safe model per user cutoff** (the full-data artifact is never used
+for historical holdouts) and compares pure BPR plus an experimental
+Hybrid + BPR variant — the Phase 6 pre-diversification ranking blended with the
+min–max-normalised BPR score at a fixed weight (0.2), then re-diversified with
+the production MMR.
+
+**BPR is experimental: the production recommender remains the heuristic hybrid
+(V1).** Learned factors cannot score users or projects absent from training
+(no cold-start support — content-based recommendation covers that in V1), and
+latent dimensions carry no human-readable meaning.
+
 ## Production build
 
 ```bash
@@ -185,12 +213,12 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 - Session-aware recommendation (Phase 6): long-term vs current-session profiles without double counting, session evidence/coherence/confidence, adaptive blend replacing the fixed 0.25, explicit session-affinity ranking component, honest session explanations, current-session indicator and Start-new-session control on `/discover`, typed session diagnostics.
 - Insights & recommendation diagnostics (Phase 7): every user-facing feed generation is persisted as an immutable `RecommendationRun` + final `RecommendationResult`s (algorithm id, session, all ten pipeline stage counts, full session/exploration/diversification/collaborative context, per-result component scores with null-preserving semantics, effective weights, raw retrieval signals, and the exact generated explanation). `/insights` visualises the live long-term vs current-session profiles (positive *and* negative signals), the adaptive session focus (evidence/coherence/confidence/blend), the recorded pipeline, recent runs (retention: newest 25 kept, 10 listed) and a per-result inspector showing score × weight = contribution, retrieval signals, sources and pre- vs post-diversification ranks. Snapshots are historical — inspecting an old run never recomputes it against today's profile — and viewing Insights never records a run.
 - Offline evaluation (Phase 8): `lib/recommender/evaluation/` — deterministic chronological unseen-item splits with strict temporal leakage prevention, a shared candidate universe, seven genuinely distinct algorithm adapters reusing the production helpers (never copied formulas), hand-verified metric implementations, and the `npm run evaluate` comparison table with a stable split fingerprint.
-- Planned: a BPR / learned-ranking experiment (later phase).
+- BPR experiment (Phase 10, offline): deterministic pairwise latent-factor training (`lib/recommender/bpr/`), a reproducible full-data artifact, and leakage-safe per-cutoff BPR / Hybrid + BPR rows in the evaluation table. Not integrated into production.
 
 ## Current limitations
 
 - The behavioural dataset is synthetic (30 seeded archetype users); evaluation numbers describe that dataset, not real-world performance, and are point estimates without significance testing.
-- Ranking weights and thresholds are hand-tuned heuristics in central config, not learned parameters; V1 deliberately contains no learned latent-factor ranking (a BPR experiment is a possible later phase).
+- Ranking weights and thresholds are hand-tuned heuristics in central config, not learned parameters; the BPR latent-factor model exists only as an offline experiment (`npm run train:bpr`) and is not part of the live recommender.
 - The catalogue is small (~163 hand-written projects) and collaborative evidence is correspondingly sparse — item-item CF is a supporting signal, not a stand-alone recommender, at this density.
 - A session's influence is capped while it is active, but once it ends its interactions count as ordinary history at full (decayed) weight — for users with very little history a single intense session can move long-term taste noticeably.
 - Dwell time is accepted by the API but the UI does not measure it yet.

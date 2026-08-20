@@ -16,6 +16,7 @@ import { RECOMMENDER_CONFIG } from "../config";
 import type { FeatureVector } from "../types";
 import {
   ALGORITHM_IMPLEMENTATIONS,
+  buildCaseBprModel,
   trainingPositiveCounts,
   trainingPositiveEvidence,
   type AlgorithmInput,
@@ -78,6 +79,8 @@ export function runEvaluation(dataset: EvaluationDataset, config: EvaluationConf
       catalog: dataset.catalog,
       catalogById,
       trainingEvidence: trainingPositiveEvidence(evaluationCase.trainingInteractions),
+      // Leakage-safe per-cutoff BPR model, trained once and shared by the bpr / hybrid-bpr adapters.
+      bprModel: buildCaseBprModel(evaluationCase, dataset.catalog),
       k,
       config,
     };

@@ -345,6 +345,41 @@ export const RECOMMENDER_CONFIG = {
   },
 
   /**
+   * Bayesian Personalized Ranking experiment (Phase 10) — OFFLINE ONLY.
+   * The live recommender remains the heuristic hybrid; BPR exists as a
+   * reproducible latent-factor experiment trained by `npm run train:bpr` and
+   * compared through `npm run evaluate`.
+   *
+   *   score(u, i)  = p_u · q_i
+   *   objective    = maximise Σ log σ(score(u,i) − score(u,j)) − λ‖Θ‖²
+   *   positives    = unique projects whose current state is saved/built/completed/shared
+   *   negatives    = explicit DISLIKE states + sampled never-touched projects
+   *
+   * Hyperparameters were fixed a priori (before looking at held-out metrics);
+   * they are experiment constants, not tuned values.
+   */
+  bpr: {
+    /** Latent dimensions per user/project vector. */
+    factors: 16,
+    epochs: 80,
+    learningRate: 0.05,
+    /** L2 regularisation applied to every updated vector. */
+    regularization: 0.01,
+    /** Sampled (u, i, j) pairs per positive project per epoch. */
+    samplesPerPositive: 1,
+    /** Probability of drawing an explicit DISLIKE negative when the user has any. */
+    explicitNegativeProbability: 0.5,
+    /** Seeded-uniform initialisation range: [-initScale, +initScale). */
+    initScale: 0.05,
+    /** Deterministic training seed (combined with user/cutoff for evaluation models). */
+    seed: 20260820,
+    /** Serialised artifact schema version. */
+    artifactVersion: 1,
+    /** Experimental offline blend: (1 − w)·hybridScore + w·normalisedBprScore. Fixed a priori. */
+    hybridBlendWeight: 0.2,
+  },
+
+  /**
    * Duration buckets used for onboarding preferences, content features and
    * UI labels. Upper bounds are inclusive; ANYTHING matches everything.
    */
