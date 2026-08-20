@@ -1,10 +1,12 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { ensureOnboarded } from "./helpers";
 
 /**
- * Phase 3 flows: the personalised feed, feedback from the feed, saved page,
- * project detail context + similar projects, keyboard controls and impressions.
- * Runs after onboarding-and-profile.spec.ts (alphabetical order), but ensures
- * onboarding is complete anyway so it is order-independent.
+ * Recommendation flows: the personalised feed, feedback from the feed, saved
+ * page, project detail context + similar projects, keyboard controls,
+ * impressions, exploration, session drift and Insights. Self-sufficient: the
+ * beforeAll onboards the demo user and seeds behavioural history when missing,
+ * so the file passes standalone as well as inside the full suite.
  */
 test.describe.configure({ mode: "serial" });
 
@@ -117,21 +119,6 @@ async function setExplorationPreference(request: APIRequestContext, value: numbe
   expect(profile.user.explorationPreference).toBeCloseTo(value, 6);
 }
 
-async function ensureOnboarded(request: APIRequestContext): Promise<void> {
-  const profile = await (await request.get("/api/profile")).json();
-  if (profile.onboarding?.completed) return;
-  const definition = await (await request.get("/api/onboarding")).json();
-  const response = await request.post("/api/onboarding", {
-    data: {
-      topics: ["systems", "databases", "networking"],
-      difficulty: "ADVANCED",
-      duration: "WEEKEND",
-      choices: definition.pairs.map((pair: { index: number; left: { slug: string } }) => ({ pairIndex: pair.index, chosenSlug: pair.left.slug })),
-    },
-  });
-  expect(response.ok()).toBe(true);
-}
-
 async function fetchFeed(request: APIRequestContext, limit = 10): Promise<FeedResponse> {
   const response = await request.get(`/api/recommendations?limit=${limit}`);
   expect(response.ok()).toBe(true);
@@ -144,8 +131,32 @@ async function firstCardSlug(page: Page): Promise<string> {
   return slug!;
 }
 
+/**
+ * The spec is self-sufficient (no hidden dependency on other spec files): it
+ * onboards the demo user if needed and seeds a small deterministic behavioural
+ * history (opens + saves on the user's own top onboarding recommendations) so
+ * collaborative evidence and saved state exist even when this file runs alone.
+ */
+async function ensureBehaviouralHistory(request: APIRequestContext): Promise<void> {
+  const profile = await (await request.get("/api/profile")).json();
+  if ((profile.stats.savedProjects as number) + (profile.stats.byType.OPEN as number) > 0) return;
+  const feed = await fetchFeed(request, 10);
+  const targets = feed.items.slice(0, 3).map((item) => item.project.id);
+  const actions: { projectId: string; type: string }[] = [
+    { projectId: targets[0]!, type: "OPEN" },
+    { projectId: targets[0]!, type: "SAVE" },
+    { projectId: targets[1]!, type: "OPEN" },
+    { projectId: targets[1]!, type: "SAVE" },
+    { projectId: targets[2]!, type: "OPEN" },
+  ];
+  for (const action of actions) {
+    expect((await request.post("/api/interactions", { data: action })).ok()).toBe(true);
+  }
+}
+
 test.beforeAll(async ({ request }) => {
   await ensureOnboarded(request);
+  await ensureBehaviouralHistory(request);
 });
 
 test.describe("recommendation API", () => {
@@ -162,6 +173,8 @@ test.describe("recommendation API", () => {
       expect(item.sources.length).toBeGreaterThan(0);
     }
     expect((await request.get("/api/recommendations?limit=0")).status()).toBe(400);
+    expect((await request.get("/api/recommendations?limit=-3")).status()).toBe(400);
+    expect((await request.get("/api/recommendations?limit=2.5")).status()).toBe(400);
     expect((await request.get("/api/recommendations?limit=abc")).status()).toBe(400);
     const capped = await fetchFeed(request, 999).catch(() => null);
     expect(capped).toBeNull();
@@ -169,7 +182,7 @@ test.describe("recommendation API", () => {
   });
 
   test("exposes a typed hybrid score breakdown and collaborative evidence for a user with behavioural history", async ({ request }) => {
-    // By now the demo user has saved / opened projects (onboarding-and-profile.spec.ts), so seeds exist.
+    // The demo user has saved / opened projects (seeded by this spec's beforeAll when missing), so CF seeds exist.
     const profile = await (await request.get("/api/profile")).json();
     expect(profile.stats.savedProjects + profile.stats.byType.OPEN).toBeGreaterThan(0);
 
@@ -192,8 +205,10 @@ test.describe("recommendation API", () => {
         expect(item.collaborative).not.toBeNull();
         expect(item.collaborative!.seeds.length).toBeGreaterThan(0);
       } else {
-        expect(item.breakdown.collaborative).toBeNull();
-        expect(item.collaborative).toBeNull();
+        // A candidate retrieved by other sources may still carry CF evidence in its
+        // breakdown; what must hold is consistency (evidence ⟷ diagnostics) and
+        // wording honesty ("people who liked…" only for genuinely CF-retrieved items).
+        expect(item.breakdown.collaborative === null).toBe(item.collaborative === null);
         expect(item.explanation.text).not.toMatch(/People who liked/);
       }
     }

@@ -1,9 +1,16 @@
 import { expect, test } from "@playwright/test";
+import { ensureOnboarded } from "./helpers";
 
 /**
- * Phase 1 smoke test: the shell renders and the catalog is reachable.
- * Requires a migrated + seeded database.
+ * Application-shell smoke: the shell renders, the catalog is reachable, and the
+ * core pages stay usable at a mobile viewport and from the keyboard. Requires a
+ * migrated + seeded database; onboards the demo user itself when needed so the
+ * file passes standalone.
  */
+test.beforeAll(async ({ request }) => {
+  await ensureOnboarded(request);
+});
+
 test.describe("application shell", () => {
   test("home redirects to onboarding or discover", async ({ page }) => {
     await page.goto("/");
@@ -28,5 +35,47 @@ test.describe("application shell", () => {
     await expect(catalog).toContainText("Projects");
     const value = await catalog.locator("dd").first().textContent();
     expect(Number((value ?? "0").replace(/[^0-9]/g, ""))).toBeGreaterThan(100);
+  });
+
+  test("primary navigation is keyboard operable", async ({ page }) => {
+    await page.goto("/discover");
+    const savedLink = page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Saved" });
+    await savedLink.focus();
+    await expect(savedLink).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/saved/);
+    const insightsLink = page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "Insights" });
+    await insightsLink.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/insights/);
+  });
+
+  test("discover and insights stay usable at a mobile viewport (375px)", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    const page = await context.newPage();
+    try {
+      await page.goto("/discover");
+      const firstCard = page.getByTestId("recommendation-card").first();
+      await expect(firstCard).toBeVisible();
+      await expect(page.getByRole("slider", { name: "Discovery mode" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Start new session" })).toBeVisible();
+      // No horizontal page overflow.
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+      // Core interactions still work on a small screen.
+      await firstCard.getByRole("button", { name: "Why?" }).click();
+      await expect(firstCard.getByTestId("recommendation-explanation")).toBeVisible();
+      await expect(firstCard.getByTestId("recommendation-explanation")).toContainText("Match score");
+
+      // Insights (the /discover visit above recorded a run, so the pipeline snapshot exists).
+      await page.goto("/insights");
+      await expect(page.getByTestId("long-term-profile")).toBeVisible();
+      await expect(page.getByTestId("pipeline-panel")).toBeVisible();
+      const firstResult = page.getByTestId("run-result").first();
+      await firstResult.locator("summary").click();
+      await expect(firstResult.getByTestId("result-components")).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    } finally {
+      await context.close();
+    }
   });
 });

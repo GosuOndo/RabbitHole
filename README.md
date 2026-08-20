@@ -44,7 +44,7 @@ npm install
 npm run db:migrate
 ```
 
-Applies `prisma/migrations` (the initial migration is committed) and regenerates the client. Use `npm run db:reset` to drop and recreate the schema.
+Applies the committed migrations in `prisma/migrations` and regenerates the client. Use `npm run db:reset` to drop and recreate the schema.
 
 ## Seed
 
@@ -189,8 +189,10 @@ Errors are JSON `{ error: { code, message, issues? } }` with 400/404/503/500 sta
 
 ## Current limitations
 
-- Offline evaluation reports point estimates only (no significance testing) over the ~30-user seeded population; results are indicative, not benchmarks.
-- A session's influence is capped while it is active, but once it ends its interactions count as ordinary history at full (decayed) weight — for users with very little history a single intense session can therefore move long-term taste noticeably.
+- The behavioural dataset is synthetic (30 seeded archetype users); evaluation numbers describe that dataset, not real-world performance, and are point estimates without significance testing.
+- Ranking weights and thresholds are hand-tuned heuristics in central config, not learned parameters; V1 deliberately contains no learned latent-factor ranking (a BPR experiment is a possible later phase).
+- The catalogue is small (~163 hand-written projects) and collaborative evidence is correspondingly sparse — item-item CF is a supporting signal, not a stand-alone recommender, at this density.
+- A session's influence is capped while it is active, but once it ends its interactions count as ordinary history at full (decayed) weight — for users with very little history a single intense session can move long-term taste noticeably.
 - Dwell time is accepted by the API but the UI does not measure it yet.
-- No authentication: everything acts as one persistent demo user (by design for V1).
+- No authentication: everything acts as one persistent demo user (by design for V1); personal resources are still resolved server-side, never from client-supplied user ids.
 - Local development only; no deployment configuration.

@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
 
 function Panel({ title, badge, children, testId }: { title: string; badge?: ReactNode; children: ReactNode; testId?: string }) {
   return (
-    <section className="rounded-card border border-border bg-surface p-4" data-testid={testId}>
+    <section className="min-w-0 rounded-card border border-border bg-surface p-4" data-testid={testId}>
       <div className="mb-3 flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{title}</h2>
         {badge}

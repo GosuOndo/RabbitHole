@@ -259,6 +259,18 @@ test.describe("API validation", () => {
 
     const malformed = await request.post("/api/interactions", { data: "not json", headers: { "content-type": "application/json" } });
     expect(malformed.status()).toBe(400);
+
+    // dwellMs is validated server-side (integer, 0 … 4 h).
+    for (const dwellMs of [-5, 12.5, 999_999_999]) {
+      const bad = await request.post("/api/interactions", { data: { projectId: "whatever", type: "OPEN", dwellMs } });
+      expect(bad.status()).toBe(400);
+    }
+
+    // Errors are structured and never leak stack traces or ORM internals.
+    const errorBody = await (await request.post("/api/interactions", { data: { projectId: "whatever", type: "LIKE" } })).json();
+    expect(errorBody.error.code).toBe("validation_error");
+    expect(typeof errorBody.error.message).toBe("string");
+    expect(JSON.stringify(errorBody)).not.toMatch(/stack|prisma|at .*\.ts/i);
   });
 
   test("validates and persists the exploration preference", async ({ request }) => {
@@ -270,6 +282,10 @@ test.describe("API validation", () => {
     const ok = await request.patch("/api/profile", { data: { explorationPreference: 0.8 } });
     expect(ok.status()).toBe(200);
     expect((await fetchProfile(request)).user.explorationPreference).toBeCloseTo(0.8, 6);
+
+    // Unknown body keys are rejected (strict schema) and an empty patch is rejected.
+    expect((await request.patch("/api/profile", { data: { explorationPreference: 0.5, weight: 99 } })).status()).toBe(400);
+    expect((await request.patch("/api/profile", { data: {} })).status()).toBe(400);
 
     const restore = await request.patch("/api/profile", { data: { explorationPreference: 0.35 } });
     expect(restore.status()).toBe(200);
